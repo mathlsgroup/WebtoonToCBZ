@@ -3,10 +3,8 @@
   "name": "Webtoon to CBZ",
   "version": "0.1.0",
   "description": "Capture images displayed in a chapter and export them to CBZ.",
-  "permissions": ["activeTab", "storage", "downloads"],
-  "host_permissions": ["<all_urls>"],
+  "permissions": ["activeTab", "scripting", "downloads"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
   "action": {"default_title": "Webtoon to CBZ", "default_popup": "popup.html"},
-  "background": {"scripts": ["background.js"]},
-  "content_scripts": [{"matches": ["<all_urls>"], "js": ["content.js"], "run_at": "document_start"}],
-  "browser_specific_settings": {"gecko": {"id": "webtoon-to-cbz@example.local"}}
+  "browser_specific_settings": {"gecko": {"id": "webtoon-to-cbz@example.local", "strict_min_version": "140.0", "data_collection_permissions": {"required": ["none"]}}, "gecko_android": {"strict_min_version": "142.0"}}
 }

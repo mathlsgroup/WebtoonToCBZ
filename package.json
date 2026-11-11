@@ -3,10 +3,17 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "tsc && node scripts/build.mjs",
+    "build": "node scripts/build.mjs",
     "dev": "npm run build && web-ext run --source-dir dist --firefox=firefox",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "npm run build && node --test tests/core.test.cjs",
+    "check:extension": "web-ext lint --source-dir dist --no-config-discovery"
   },
-  "devDependencies": {"typescript": "^5.7.3", "web-ext": "^8.3.0"},
-  "dependencies": {"jszip": "^3.10.1"}
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "web-ext": "^10.8.0"
+  },
+  "dependencies": {
+    "jszip": "^3.10.1"
+  }
 }

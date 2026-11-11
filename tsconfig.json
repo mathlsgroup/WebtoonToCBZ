@@ -1,4 +1,4 @@
 {
-  "compilerOptions": {"target":"ES2022","module":"ESNext","moduleResolution":"Bundler","lib":["ES2022","DOM"],"strict":true,"outDir":"dist","rootDir":"src","skipLibCheck":true},
+  "compilerOptions": {"target":"ES2022","module":"ESNext","moduleResolution":"Bundler","lib":["ES2022","DOM","DOM.Iterable"],"strict":true,"noEmitOnError":true,"outDir":"dist","rootDir":"src","skipLibCheck":true},
   "include":["src/**/*.ts"]
 }
