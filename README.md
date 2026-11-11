@@ -57,6 +57,17 @@ before export. Uncheck unwanted next-chapter previews, then use **Hide excluded
 images** to hide them without deleting them. Uncheck this option to show them again
 and restore inclusion if needed. No images are excluded automatically by resolution.
 
+To exclude low-resolution previews in one action, enter **Minimum image width (px)**
+and click **Exclude narrower images** before suggesting page numbers. The field is
+initially blank. Only included images with a known width strictly below the threshold
+are disabled; equal-width images and images with unknown dimensions are retained.
+For example, a minimum of 321 px excludes 320 px thumbnails. This uses captured
+dimensions without fetching or converting images. Exclusions survive toolbar refresh
+and are ignored by grouping/export. Use **Hide excluded images** to hide them; show
+them again and use their inclusion checkbox to restore any legitimate narrow strips.
+Changing the threshold does not re-enable previous exclusions. Apply it again after
+capturing new images if needed.
+
 **Suggest page numbers** downloads/decodes included images locally, then proposes
 numbers without merging. It replaces current assignments, so run it before making
 manual corrections. It looks for consecutive landscape strips starting with a

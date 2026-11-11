@@ -20,6 +20,8 @@
   const heightButton = document.getElementById('detect-height') as HTMLButtonElement | null;
   const targetHeightInput = document.getElementById('target-height') as HTMLInputElement | null;
   const heightToleranceInput = document.getElementById('height-tolerance') as HTMLInputElement | null;
+  const minimumWidthInput = document.getElementById('minimum-width') as HTMLInputElement | null;
+  const excludeNarrowButton = document.getElementById('exclude-narrow') as HTMLButtonElement | null;
   const objectUrls = new Set<string>();
   const mergeHistory: string[] = [];
   function ensurePageNumbers(): void {
@@ -234,6 +236,38 @@
 
   if (review) {
     hideExcluded!.onchange = () => { if (!busy) render(); };
+    excludeNarrowButton!.onclick = () => {
+      if (busy) return;
+      const minimum = minimumWidthInput!.valueAsNumber;
+      if (!Number.isSafeInteger(minimum) || minimum < 1) {
+        setStatus('Enter a positive whole minimum width in pixels.'); return;
+      }
+      const affected = entries.filter(page => page.selected && Number.isFinite(page.width) && page.width > 0 && page.width < minimum);
+      busy = true; render();
+      void safe(async () => {
+        try {
+          const state = await send('status');
+          if (state.generation !== generation) {
+            await refresh(); throw new Error('Capture changed. Review the new list before excluding images.');
+          }
+          for (const page of affected) {
+            for (const source of originalPages(page)) {
+              const updated = await send('select', { url: source.url, selected: false });
+              if (updated.generation !== generation) {
+                await refresh(); throw new Error('Capture changed. Review the new list before excluding images.');
+              }
+            }
+            includeReviewPage(page, false); mergeSelected.delete(page.url);
+          }
+          setStatus(affected.length + ' image(s) narrower than ' + minimum + ' px excluded. '
+            + 'Use Hide excluded images to hide them. Re-enable individual images with their inclusion checkbox.');
+        } finally {
+          busy = false;
+          for (const control of document.querySelectorAll<HTMLButtonElement | HTMLInputElement>('button,input')) control.disabled = false;
+          render();
+        }
+      });
+    };
     heightButton!.onclick = () => {
       if (busy) return;
       try {

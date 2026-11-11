@@ -420,8 +420,8 @@ async function reviewFixture(options = {}) {
     } }; }
   }
   const ids=new Map();
-  for(const id of ['status','list','title','export','merge','undo','merge-numbered','detect','selection','numbering','start','stop','refresh','close-preview','hide-excluded','target-height','detect-height','height-tolerance']) {
-    ids.set(id,new Element(['title','hide-excluded','target-height','height-tolerance'].includes(id)?'input':id==='status'||id==='list'||id==='selection'||id==='numbering'?'div':'button'));
+  for(const id of ['status','list','title','export','merge','undo','merge-numbered','detect','selection','numbering','start','stop','refresh','close-preview','hide-excluded','target-height','detect-height','height-tolerance','minimum-width','exclude-narrow']) {
+    ids.set(id,new Element(['title','hide-excluded','target-height','height-tolerance','minimum-width'].includes(id)?'input':id==='status'||id==='list'||id==='selection'||id==='numbering'?'div':'button'));
   }
   ids.get('height-tolerance').valueAsNumber=1;
   function controls() {
@@ -741,4 +741,40 @@ test('review forwards adjustable height tolerance, including exact matching at z
   f.ids.get('height-tolerance').valueAsNumber=0;
   f.ids.get('detect-height').onclick();
   assert.deepEqual(f.numbers().map(input=>input.value),['1','2']);
+});
+
+test('minimum width excludes previews, preserves threshold/unknown widths and retains exclusions across refresh', async () => {
+  const f=await reviewFixture({pages:[
+    {url:'a',width:1280,height:500}, {url:'preview',width:320,height:320},
+    {url:'b',width:1280,height:500}, {url:'equal',width:321,height:500},
+    {url:'unknown',width:0,height:0}, {url:'excluded',width:1280,height:500,selected:false},
+  ]});
+  f.setNumbers([1,99,1,2,3,4]);
+  assert.equal(f.ids.get('merge-numbered').disabled,true);
+  f.ids.get('minimum-width').valueAsNumber=321;
+  f.ids.get('exclude-narrow').onclick(); await f.idle();
+  assert.deepEqual(f.rows().map(row=>row.children[0].checked),[true,false,true,true,true,false]);
+  assert.equal(f.ids.get('merge-numbered').disabled,false);
+  assert.match(f.ids.get('status').textContent,/1 image\(s\) narrower than 321 px excluded/);
+  assert.equal(f.permissions.length,0);
+  await f.ids.get('refresh').onclick();
+  assert.equal(f.rows()[1].children[0].checked,false);
+  f.ids.get('minimum-width').valueAsNumber=100;
+  f.ids.get('exclude-narrow').onclick(); await f.idle();
+  assert.equal(f.rows()[1].children[0].checked,false);
+  const hide=f.ids.get('hide-excluded'); hide.checked=true; hide.onchange();
+  assert.equal(f.rows()[1].hidden,true);
+  hide.checked=false; hide.onchange();
+  const include=f.rows()[1].children[0]; include.checked=true; include.onchange();
+  assert.equal(f.rows()[1].children[0].checked,true);
+});
+
+test('minimum width rejects empty, fractional and invalid thresholds without changing inclusion', async () => {
+  const f=await reviewFixture({pages:[{url:'preview',width:320,height:320}]});
+  for(const minimum of [NaN,0,-1,320.5,Infinity]) {
+    f.ids.get('minimum-width').valueAsNumber=minimum;
+    f.ids.get('exclude-narrow').onclick();
+    assert.match(f.ids.get('status').textContent,/positive whole minimum width/);
+    assert.equal(f.rows()[0].children[0].checked,true);
+  }
 });
