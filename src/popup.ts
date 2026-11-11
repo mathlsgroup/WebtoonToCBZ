@@ -22,6 +22,11 @@
   const heightToleranceInput = document.getElementById('height-tolerance') as HTMLInputElement | null;
   const minimumWidthInput = document.getElementById('minimum-width') as HTMLInputElement | null;
   const excludeNarrowButton = document.getElementById('exclude-narrow') as HTMLButtonElement | null;
+  const autoButton = document.getElementById('auto-analyze') as HTMLButtonElement | null;
+  const autoRatioInput = document.getElementById('auto-ratio') as HTMLInputElement | null;
+  const autoToleranceInput = document.getElementById('auto-tolerance') as HTMLInputElement | null;
+  const reviewExcludedButton = document.getElementById('review-excluded') as HTMLButtonElement | null;
+  let excludedOnly = false;
   const objectUrls = new Set<string>();
   const mergeHistory: string[] = [];
   function ensurePageNumbers(): void {
@@ -51,6 +56,10 @@
     }
     detectButton!.disabled = busy || !entries.some(page => page.selected);
     heightButton!.disabled = busy || !entries.some(page => page.selected);
+    autoButton!.disabled = busy || !entries.some(page => page.selected);
+    reviewExcludedButton!.disabled = busy;
+    reviewExcludedButton!.textContent = excludedOnly ? 'Back to pages'
+      : 'Review excluded (' + entries.filter(page => !page.selected).length + ')';
     const counts = new Map<number, number>();
     for (const page of entries) if (page.selected && page.pageNumber !== undefined) {
       counts.set(page.pageNumber, (counts.get(page.pageNumber) ?? 0) + 1);
@@ -78,6 +87,37 @@
   }
   async function safe(action: () => Promise<void>): Promise<void> {
     try { await action(); } catch (error) { setStatus(String(error)); }
+  }
+  async function verifyCapture(): Promise<void> {
+    const state = await send('status');
+    if (state.generation !== generation) {
+      await refresh(); throw new Error('Capture changed. Review the new list before continuing.');
+    }
+  }
+  async function persistInclusion(page: Entry, selected: boolean): Promise<void> {
+    for (const source of originalPages(page)) {
+      const state = await send('select', { url: source.url, selected });
+      if (state.generation !== generation) {
+        await refresh(); throw new Error('Capture changed. Review the new list before continuing.');
+      }
+    }
+  }
+  function restoreExcludedPage(page: Entry): void {
+    if (busy) return;
+    busy = true; render();
+    void safe(async () => {
+      try {
+        await verifyCapture(); await persistInclusion(page, true);
+        includeReviewPage(page, true);
+        page.keepSeparate = true; page.pageNumber = undefined;
+        page.groupingNote = 'Exception: manually restored as a separate page. Protected during automatic analysis.';
+        setStatus('Page restored. Use Back to pages to review it.');
+      } finally {
+        busy = false;
+        for (const control of document.querySelectorAll<HTMLButtonElement | HTMLInputElement>('button,input')) control.disabled = false;
+        render();
+      }
+    });
   }
   function runReviewTask(pages: Entry[], message: string, task: (verify: () => Promise<void>) => Promise<void>): void {
     if (busy) return;
@@ -136,7 +176,7 @@
     entries.forEach((item, index) => {
       const row = document.createElement('div');
       row.className = 'entry' + (mergeSelected.has(item.url) ? ' merge-selected' : '');
-      row.hidden = !!hideExcluded?.checked && !item.selected;
+      row.hidden = excludedOnly ? item.selected : !!hideExcluded?.checked && !item.selected;
       const check = document.createElement('input');
       check.type = 'checkbox'; check.checked = item.selected;
       check.setAttribute('aria-label', 'Include page ' + (index + 1));
@@ -179,13 +219,18 @@
           dialog.querySelector('img')!.src = item.url; dialog.showModal();
         };
         row.append(enlarge);
+        if (!item.selected) {
+          const restorePage = document.createElement('button'); restorePage.textContent = 'Restore as page';
+          restorePage.disabled = busy; restorePage.onclick = () => restoreExcludedPage(item); row.append(restorePage);
+        }
         if (item.sources) {
           const restore = document.createElement('button'); restore.textContent = 'Undo merge';
           restore.disabled = busy; restore.onclick = () => undo(item); row.append(restore);
         }
         for (const [label, offset] of [['Up', -1], ['Down', 1]] as const) {
           let target = index + offset;
-          while (hideExcluded?.checked && target >= 0 && target < entries.length && !entries[target].selected) target += offset;
+          while (target >= 0 && target < entries.length
+            && (excludedOnly ? entries[target].selected : hideExcluded?.checked && !entries[target].selected)) target += offset;
           const button = document.createElement('button');
           button.textContent = label;
           button.disabled = target < 0 || target >= entries.length;
@@ -215,6 +260,8 @@
     } else {
       objectUrls.forEach(url => URL.revokeObjectURL(url)); objectUrls.clear();
       mergeSelected.clear(); mergeHistory.length = 0;
+      excludedOnly = false;
+      if (review) document.getElementById('auto-summary')!.textContent = 'Automatic analysis proposes all groups and sets aside nonmatching images. Check exclusions before merging.';
       entries = state.entries;
     }
     generation = state.generation;
@@ -235,7 +282,46 @@
   titleInput.oninput = () => { void safe(async () => { await send('title', { title: titleInput.value }); }); };
 
   if (review) {
-    hideExcluded!.onchange = () => { if (!busy) render(); };
+    hideExcluded!.onchange = () => { if (!busy) { excludedOnly = false; render(); } };
+    reviewExcludedButton!.onclick = () => { if (!busy) { excludedOnly = !excludedOnly; render(); } };
+    autoButton!.onclick = () => {
+      if (busy) return;
+      let plan: AutoGroupingResult;
+      try {
+        plan = suggestPagesAutomatically(entries, {
+          ratio: autoRatioInput!.value?.trim() ? autoRatioInput!.valueAsNumber : undefined,
+          tolerancePercent: autoToleranceInput!.valueAsNumber,
+          minimumWidth: minimumWidthInput!.value?.trim() ? minimumWidthInput!.valueAsNumber : undefined,
+        });
+      } catch (error) {
+        setStatus(String(error)); document.getElementById('auto-summary')!.textContent = String(error); return;
+      }
+      busy = true; render(); setStatus('Applying automatic analysis...');
+      void safe(async () => {
+        try {
+          await verifyCapture();
+          for (const suggestion of plan.suggestions) {
+            if (suggestion.selected !== suggestion.page.selected) await persistInclusion(suggestion.page, suggestion.selected);
+          }
+          await verifyCapture();
+          for (const suggestion of plan.suggestions) {
+            includeReviewPage(suggestion.page, suggestion.selected);
+            suggestion.page.pageNumber = suggestion.pageNumber;
+            suggestion.page.groupingNote = suggestion.note;
+          }
+          mergeSelected.clear(); excludedOnly = false; hideExcluded!.checked = true;
+          const groups = numberedPageGroups(entries);
+          const excluded = entries.filter(page => !page.selected).length;
+          const message = 'Reference height/width ' + plan.ratio.toFixed(4) + ': ' + groups.length
+            + ' group(s) ready to merge, ' + excluded + ' excluded image(s). Review excluded images, then Merge numbered pages.';
+          setStatus(message); document.getElementById('auto-summary')!.textContent = message;
+        } finally {
+          busy = false;
+          for (const control of document.querySelectorAll<HTMLButtonElement | HTMLInputElement>('button,input')) control.disabled = false;
+          render();
+        }
+      });
+    };
     excludeNarrowButton!.onclick = () => {
       if (busy) return;
       const minimum = minimumWidthInput!.valueAsNumber;

@@ -3,6 +3,7 @@
   bytes?: Uint8Array; sources?: ReviewPage[];
   pageNumber?: number; groupingNote?: string;
   mergeLayout?: ReviewPage[];
+  keepSeparate?: boolean;
 };
 
 function originalPages(page: ReviewPage): ReviewPage[] {

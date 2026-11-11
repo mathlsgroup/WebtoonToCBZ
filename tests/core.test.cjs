@@ -272,6 +272,7 @@ test('excluding a nested merge also excludes restored intermediate pages', () =>
 function groupingFixture(options = {}) {
   const f = mergerFixture(options);
   vm.runInContext(fs.readFileSync('dist/pageGrouping.js', 'utf8'), f.context);
+  vm.runInContext(fs.readFileSync('dist/autoGrouping.js', 'utf8'), f.context);
   return f;
 }
 
@@ -420,10 +421,11 @@ async function reviewFixture(options = {}) {
     } }; }
   }
   const ids=new Map();
-  for(const id of ['status','list','title','export','merge','undo','merge-numbered','detect','selection','numbering','start','stop','refresh','close-preview','hide-excluded','target-height','detect-height','height-tolerance','minimum-width','exclude-narrow']) {
-    ids.set(id,new Element(['title','hide-excluded','target-height','height-tolerance','minimum-width'].includes(id)?'input':id==='status'||id==='list'||id==='selection'||id==='numbering'?'div':'button'));
+  for(const id of ['status','list','title','export','merge','undo','merge-numbered','detect','selection','numbering','start','stop','refresh','close-preview','hide-excluded','target-height','detect-height','height-tolerance','minimum-width','exclude-narrow','auto-analyze','auto-ratio','auto-tolerance','review-excluded','auto-summary']) {
+    ids.set(id,new Element(['title','hide-excluded','target-height','height-tolerance','minimum-width','auto-ratio','auto-tolerance'].includes(id)?'input':id==='status'||id==='list'||id==='selection'||id==='numbering'?'div':'button'));
   }
   ids.get('height-tolerance').valueAsNumber=1;
+  ids.get('auto-tolerance').valueAsNumber=10;
   function controls() {
     const found=new Set();
     function visit(element) {
@@ -464,7 +466,7 @@ async function reviewFixture(options = {}) {
   const idle=async()=>{
     for(let i=0;i<200;i++) {
       await new Promise(resolve=>setTimeout(resolve,2));
-      if(!ids.get('detect').disabled)return;
+      if(!ids.get('review-excluded').disabled)return;
     }
     throw new Error('Review operation did not finish');
   };
@@ -777,4 +779,147 @@ test('minimum width rejects empty, fractional and invalid thresholds without cha
     assert.match(f.ids.get('status').textContent,/positive whole minimum width/);
     assert.equal(f.rows()[0].children[0].checked,true);
   }
+});
+
+function automaticChapter(f) {
+  const page=(url,width,height,extra={})=>({...f.page(url),width,height,...extra});
+  return [
+    page('reference-a',1000,1500),
+    page('a1',1000,400),page('thumb',320,320),page('a2',1000,500),page('a3',1000,600),
+    page('b1',1200,600),page('b2',1200,600),page('b3',1200,600),
+    page('c1',800,300),page('c2',800,400),page('c3',800,500),
+    page('double',2000,1400),page('reference-b',1200,1800),
+  ];
+}
+
+test('automatic ratio analysis finds three different page heights and excludes an interleaved thumbnail and double page', () => {
+  const f=groupingFixture(), pages=automaticChapter(f);
+  const plan=f.context.suggestPagesAutomatically(pages,{tolerancePercent:10});
+  assert.equal(plan.ratio,1.5);
+  const mapped=new Map(Array.from(plan.suggestions,s=>[s.page.url,s]));
+  assert.equal(mapped.get('thumb').selected,false);
+  assert.equal(mapped.get('double').selected,false);
+  for(const prefix of ['a','b','c']) {
+    assert.equal(mapped.get(prefix+'1').pageNumber,mapped.get(prefix+'3').pageNumber);
+    assert.equal(mapped.get(prefix+'2').selected,true);
+  }
+  assert.equal(mapped.get('reference-a').selected,true);
+  assert.equal(mapped.get('reference-b').selected,true);
+  assert.equal(pages.every(page=>page.selected),true); // The planner is non-mutating.
+  const projected=plan.suggestions.map(s=>({...s.page,selected:s.selected,pageNumber:s.pageNumber}));
+  assert.equal(f.context.numberedPageGroups(projected).length,3);
+});
+
+test('automatic ratio analysis respects exclusions, restored exceptions, existing merges and unknown dimensions', () => {
+  const f=groupingFixture(),pages=automaticChapter(f);
+  pages.find(page=>page.url==='double').keepSeparate=true;
+  pages.find(page=>page.url==='thumb').selected=false;
+  pages.push({...f.page('unknown'),width:0,height:0});
+  pages.push({...f.page('merged'),width:900,height:2500,sources:[f.page('old')]});
+  const plan=f.context.suggestPagesAutomatically(pages,{tolerancePercent:10,minimumWidth:400});
+  const mapped=new Map(Array.from(plan.suggestions,s=>[s.page.url,s]));
+  assert.equal(mapped.get('thumb').selected,false);
+  for(const url of ['double','unknown','merged'])assert.equal(mapped.get(url).selected,true);
+  assert.match(mapped.get('unknown').note,/manual review/);
+  assert.match(mapped.get('double').note,/Exception/);
+});
+
+test('automatic ratio analysis fails safely without reference and supports an explicit reference', () => {
+  const f=groupingFixture(),pages=heightStrips(f,[500,500,500],1000);
+  assert.throws(()=>f.context.suggestPagesAutomatically(pages,{tolerancePercent:10}),/No reliable portrait ratio/);
+  const result=f.context.suggestPagesAutomatically(pages,{ratio:1.5,tolerancePercent:10});
+  assert.deepEqual(Array.from(result.suggestions,s=>s.pageNumber),[1,1,1]);
+  for(const options of [{ratio:1},{ratio:NaN},{tolerancePercent:21},{minimumWidth:-1}]) {
+    assert.throws(()=>f.context.suggestPagesAutomatically(pages,{ratio:1.5,tolerancePercent:10,...options}));
+  }
+  assert.equal(pages.every(page=>page.selected),true);
+});
+
+test('automatic grouping preserves complete low-resolution pages unless a minimum width is explicitly provided', () => {
+  const f=groupingFixture(),pages=automaticChapter(f);
+  pages.splice(1,0,{...f.page('small-portrait'),width:320,height:480});
+  let plan=f.context.suggestPagesAutomatically(pages,{tolerancePercent:10});
+  assert.equal(plan.suggestions.find(s=>s.page.url==='small-portrait').selected,true);
+  plan=f.context.suggestPagesAutomatically(pages,{tolerancePercent:10,minimumWidth:400});
+  assert.equal(plan.suggestions.find(s=>s.page.url==='small-portrait').selected,false);
+});
+
+test('automatic review handles all groups once, exposes exclusions, protects restored exceptions and preserves undo/export order', async () => {
+  const f=await reviewFixture({
+    pages:automaticChapter(groupingFixture()),
+    sizes:[[1000,400],[1000,500],[1000,600],[1200,600],[1200,600],[1200,600],[800,300],[800,400],[800,500]],
+  });
+  f.ids.get('auto-analyze').onclick(); await f.idle();
+  assert.match(f.ids.get('auto-summary').textContent,/3 group\(s\) ready to merge, 2 excluded/);
+  assert.equal(f.permissions.length,0);
+  assert.equal(f.rows()[2].children[0].checked,false);
+  assert.equal(f.rows()[2].hidden,true);
+  f.ids.get('review-excluded').onclick();
+  assert.deepEqual(f.rows().flatMap((row,index)=>!row.hidden?[index]:[]),[2,11]);
+  const restore=f.rows()[11].children.find(child=>child.textContent==='Restore as page');
+  restore.onclick(); await f.idle();
+  assert.equal(f.rows()[11].children[0].checked,true);
+  f.ids.get('review-excluded').onclick();
+  f.ids.get('auto-analyze').onclick(); await f.idle();
+  assert.equal(f.rows()[11].children[0].checked,true);
+  assert.match(f.ids.get('auto-summary').textContent,/3 group\(s\) ready to merge, 1 excluded/);
+  await f.ids.get('refresh').onclick();
+  assert.equal(f.rows()[2].children[0].checked,false);
+  f.ids.get('merge-numbered').onclick(); await f.idle();
+  assert.equal(f.rows().length,7); // Two references, three merged pages, thumbnail, double page.
+  assert.equal(f.rows().filter(row=>row.children[0].checked).length,6);
+  const captions=f.rows().map(row=>row.children[2].textContent);
+  assert.match(captions[1],/1000.*1500/);
+  assert.match(captions[3],/1200.*1800/);
+  assert.match(captions[4],/800.*1200/);
+  f.ids.get('undo').onclick();
+  assert.equal(f.rows().length,9);
+  f.ids.get('undo').onclick(); f.ids.get('undo').onclick();
+  assert.equal(f.rows().length,13);
+  assert.equal(f.rows()[2].children[0].checked,false);
+});
+
+test('automatic review leaves inclusion and numbering unchanged when no ratio can be estimated', async () => {
+  const f=await reviewFixture({pages:[{url:'a',width:1000,height:500},{url:'b',width:1000,height:500}]});
+  const before=f.numbers().map(input=>input.value);
+  f.ids.get('auto-analyze').onclick();
+  assert.match(f.ids.get('auto-summary').textContent,/Nothing was changed/);
+  assert.deepEqual(f.numbers().map(input=>input.value),before);
+  assert.equal(f.rows().every(row=>row.children[0].checked),true);
+  f.ids.get('auto-ratio').value='1.5'; f.ids.get('auto-ratio').valueAsNumber=1.5;
+  f.ids.get('auto-analyze').onclick(); await f.idle();
+  assert.equal(f.rows().every(row=>!row.children[0].checked),true); // Missing third strip: reviewable exclusions.
+  f.ids.get('review-excluded').onclick();
+  assert.equal(f.rows().every(row=>!row.hidden),true);
+});
+
+test('automatic multi-height groups export once in reading order with exact unmodified reference bytes', async () => {
+  const f=groupingFixture({sizes:[[1000,400],[1000,500],[1000,600],[1200,600],[1200,600],[1200,600],[800,300],[800,400],[800,500]]});
+  const original=automaticChapter(f);
+  original.at(-1).bytes=f.png;
+  const plan=f.context.suggestPagesAutomatically(original,{tolerancePercent:10});
+  plan.suggestions.forEach(s=>{s.page.selected=s.selected;s.page.pageNumber=s.pageNumber;});
+  const groups=f.context.numberedPageGroups(original);
+  let current=original;
+  for(const sources of groups) {
+    const merged=await f.context.mergeImagesVertically(sources);
+    current=f.context.replaceMergedPages(current,sources,merged);
+  }
+  const included=current.filter(page=>page.selected);
+  assert.deepEqual(Array.from(included,page=>[page.width,page.height]),[[1000,1500],[1000,1500],[1200,1800],[800,1200],[1200,1800]]);
+  await f.context.exportArchive(included,'Automatic chapter',()=>{});
+  const zip=await JSZip.loadAsync(await f.saved[0].arrayBuffer());
+  assert.deepEqual(Object.keys(zip.files),['0001.jpg','0002.jpg','0003.jpg','0004.jpg','0005.png']);
+  assert.deepEqual(await zip.file('0001.jpg').async('uint8array'),original[0].bytes);
+  assert.deepEqual(await zip.file('0005.png').async('uint8array'),original.at(-1).bytes);
+});
+
+test('automatic analysis reports source communication failure without committing the proposal', async () => {
+  const f=await reviewFixture({pages:automaticChapter(groupingFixture())});
+  const previous=f.numbers().map(input=>input.value);
+  f.context.browser.tabs.sendMessage=async()=>{throw new Error('tab closed');};
+  f.ids.get('auto-analyze').onclick(); await f.idle();
+  assert.match(f.ids.get('status').textContent,/source tab was closed or navigated/);
+  assert.deepEqual(f.numbers().map(input=>input.value),previous);
+  assert.equal(f.rows().every(row=>row.children[0].checked),true);
 });

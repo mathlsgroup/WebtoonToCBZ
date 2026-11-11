@@ -7,16 +7,18 @@
 <div class="buttons"><button id="start">Start</button><button id="stop">Stop</button><button id="refresh">Refresh</button></div>
 <label>CBZ filename <input id="title" type="text" placeholder="Series - 0280"></label>
 <div class="review-actions">
+<div class="height-controls"><button id="auto-analyze">Analyze automatically</button><label>Reference ratio (height / width) <input id="auto-ratio" type="number" min="1" step="any" placeholder="Automatic"></label><label>Ratio tolerance (%) <input id="auto-tolerance" type="number" min="0" max="20" step="0.1" value="10"></label><button id="review-excluded">Review excluded (0)</button></div>
 <label><input id="hide-excluded" type="checkbox"> Hide excluded images</label>
 <div class="height-controls"><label>Minimum image width (px) <input id="minimum-width" type="number" min="1" step="1" placeholder="Enter width"></label><button id="exclude-narrow">Exclude narrower images</button></div>
 <div class="height-controls"><label>Target page height (px) <input id="target-height" type="number" min="1" max="32767" step="1" placeholder="Enter height"></label><label>Tolerance (%) <input id="height-tolerance" type="number" min="0" max="10" step="0.1" value="1"></label><button id="detect-height">Suggest by height</button></div>
 <div class="buttons"><button id="detect">Suggest page numbers</button><button id="merge-numbered" disabled>Merge numbered pages</button><button id="merge" disabled>Merge vertically</button><button id="undo" disabled>Undo merge</button></div>
 <p id="numbering" role="status"></p>
 <p id="selection" role="status">Select images with the Merge checkboxes. Inclusion checkboxes control export separately.</p>
+<p id="auto-summary" role="status">Automatic analysis proposes all groups and sets aside nonmatching images. Check exclusions before merging.</p>
 </div>
 <p>Page number: give strips the same number, then use Merge numbered pages. Excluded images between strips are ignored. Suggest page numbers checks borders and portrait ratios. Suggest by height replaces assignments using total heights within the chosen tolerance, without checking borders or reference ratios. Review before merging. Numbers label groups; reading order controls export.</p>
 <div id="list"></div>
 <dialog id="large-preview"><button id="close-preview">Close preview</button><img alt="Full page preview"></dialog>
 <button id="export" disabled>Export selected images to CBZ</button>
-<script src="jszip.min.js"></script><script src="export.js"></script><script src="imageMerger.js"></script><script src="pageGrouping.js"></script><script src="popup.js"></script>
+<script src="jszip.min.js"></script><script src="export.js"></script><script src="imageMerger.js"></script><script src="pageGrouping.js"></script><script src="autoGrouping.js"></script><script src="popup.js"></script>
 </body></html>

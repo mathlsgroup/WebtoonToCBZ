@@ -46,6 +46,48 @@ not silently export stale data.
 
 ## Manual vertical merging
 
+### Automatic ratio analysis
+
+Click **Analyze automatically** to prepare the whole chapter in one pass, then
+**Merge numbered pages** to apply every suggested group together. This avoids
+repeating the height-based workflow for different page sizes. Analysis uses captured
+dimensions locally; it does not fetch, convert, merge, or delete images. It replaces
+current number assignments and disables nonmatching images, preserving manual exclusions.
+
+The reference height/width ratio is estimated from at least two similar included
+portrait pages, including existing merges. **Reference ratio (height / width)** can
+override it (for example, width 1000 and height 1500 gives 1.5). No chapter height or
+ratio is predefined. If there are no reliable complete pages, analysis leaves edits
+unchanged and requests a reference ratio. **Ratio tolerance (%)** defaults to 10%
+and is adjustable from 0 to 20%; it is independent of height tolerance.
+
+Included full pages matching the reference stay separate. Other images are tested
+as consecutive strips whose total height divided by maximum width matches the
+reference. Group widths must agree within 5%; the closest ratio is preferred.
+Different widths therefore produce different target heights automatically.
+The existing **Minimum image width** field, when filled, is applied in the same
+analysis. Narrower incompatible previews between strips may be excluded so they
+do not interrupt a group. Existing merges and explicitly restored exceptions are
+protected, and unknown dimensions remain included for manual review. Canvas limits
+are checked before proposing a group.
+
+**Review excluded (N)** shows only excluded images, with dimensions, reasons and
+**Preview**. **Restore as page** re-enables an exceptional double page with its own
+number and protects it during later automatic analyses. **Back to pages** returns
+to the main view. The ordinary inclusion checkbox can instead restore strips for
+manual numbering without protecting them from future automatic classification.
+Exclusions are retained in source capture state; notes, numbering and exception
+protection live only in the review tab and survive its toolbar refresh.
+
+This is a geometric heuristic, not a content or page-boundary detector. It can
+exclude legitimate wide pages, mistake matching-ratio previews for real pages,
+or join strips at the wrong boundary. Check the groups and every exclusion before
+merging/exporting. A missing strip or unusually long webtoon segment may need manual
+handling. A complete low-resolution page with the correct ratio is retained unless
+the user supplies a minimum width. Nothing is silently removed from the review.
+
+### Manual controls
+
 The review toolbar stays visible while scrolling. Each image has an editable
 **Page number** column. Give consecutive included strips the same number, then
 click **Merge numbered pages** to apply all groups at once. Number labels do not
@@ -200,6 +242,7 @@ The complete archive is assembled in memory, which limits very large chapters.
 - `src/export.ts`: signature checks, filename sanitation and CBZ saving.
 - `src/imageMerger.ts`: Canvas merging and reversible source retention.
 - `src/pageGrouping.ts`: native border inspection, numbering suggestions and group validation.
+- `src/autoGrouping.ts`: automatic ratio-based grouping and reviewable exclusion planning.
 - `scripts/build.mjs`: staged packaging and local JSZip bundling. The bundled
   setImmediate shim rejects string callbacks to comply with extension CSP;
   builds fail if the expected vendor shim changes. A regression test runs this
