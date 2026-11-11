@@ -20,6 +20,7 @@ try {
   for (const file of ['manifest.json', 'popup.html', 'popup.css', 'review.html']) {
     cpSync(resolve(root, file), resolve(staging, file));
   }
+  cpSync(require.resolve('jpeg-js/lib/encoder.js'), resolve(staging, 'jpeg-encoder.js'));
   // JSZip's bundled setImmediate shim accepts string callbacks through dynamic
   // code generation. Extension CSP forbids that API; allow function callbacks only.
   const vendor = readFileSync(require.resolve('jszip/dist/jszip.min.js'), 'utf8');

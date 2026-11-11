@@ -20,3 +20,4 @@ body.popup{box-sizing:border-box;width:420px;height:100%;max-height:none;margin:
 .popup .buttons #start{grid-column:1/-1}
 .popup .entry img{width:70px;height:90px;flex-shrink:0}
 .popup .entry span{min-width:0;overflow-wrap:anywhere}
+.popup #image-info{font-size:11px;line-height:1.3;max-height:3.9em;overflow:auto}

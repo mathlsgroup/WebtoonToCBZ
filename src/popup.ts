@@ -16,6 +16,36 @@
   let archivedMode = false;
   let previewCacheVersion: number | undefined;
   let previewCacheWarning = '';
+  const showImageInfo = document.getElementById('show-image-info') as HTMLInputElement | null;
+  const imageInfoPanel = document.getElementById('image-info');
+  const measureFiles = document.getElementById('measure-files') as HTMLButtonElement | null;
+  const convertJpeg = document.getElementById('convert-jpeg') as HTMLInputElement | null;
+  const jpegEngine = document.getElementById('jpeg-engine') as HTMLSelectElement | null;
+  const checkImageMagick = document.getElementById('check-imagemagick') as HTMLButtonElement | null;
+  let lastExportInfo = '';
+  function updateImageInformation(): void {
+    if (imageInfoPanel) {
+      imageInfoPanel.hidden = !showImageInfo?.checked;
+      imageInfoPanel.textContent = imageFileSummary(entries) + (lastExportInfo ? ' ' + lastExportInfo : '');
+    }
+    if (measureFiles) { measureFiles.hidden = !showImageInfo?.checked; measureFiles.disabled = busy; }
+    if (jpegEngine) jpegEngine.disabled=busy || !convertJpeg?.checked;
+    if (checkImageMagick) checkImageMagick.disabled=busy;
+  }
+  if (showImageInfo) showImageInfo.onchange = () => render();
+  if (convertJpeg) convertJpeg.onchange = updateImageInformation;
+  if (checkImageMagick) checkImageMagick.onclick=()=>{
+    if(busy)return;
+    const permission=browser.permissions.request({permissions:['nativeMessaging']});
+    return safe(async()=>{
+      const label=document.getElementById('jpeg-engine-status')!;
+      if(!await permission){label.textContent='Local connector access was not granted. Automatic mode uses the built-in encoder.';return;}
+      checkImageMagick.disabled=true;label.textContent='Checking the local ImageMagick connector...';
+      try {label.textContent='Available: '+await probeImageMagick()+'. JPEG quality 97 / 4:4:4.';}
+      catch(error){label.textContent='ImageMagick unavailable: '+String(error)+'. Install the Firefox connector with npm run native:install. Automatic mode uses the built-in encoder.';}
+      finally {checkImageMagick.disabled=false;}
+    });
+  };
   const mergeSelected = new Set<string>();
   const mergeButton = document.getElementById('merge') as HTMLButtonElement | null;
   const undoButton = document.getElementById('undo') as HTMLButtonElement | null;
@@ -140,6 +170,7 @@
           const extension = imageExtension(bytes);
           const preview = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: extension === 'jpg' ? 'image/jpeg' : 'image/' + extension }));
           page.bytes = bytes; page.previewUrl = preview; page.captureError = undefined;
+          page.fileType = extension; page.byteLength = bytes.length;
           objectUrls.add(preview);
           render(); // Show each successful preview without waiting for the chapter.
           if (!review && previewCacheVersion !== undefined) {
@@ -277,6 +308,13 @@
       const caption = document.createElement('span');
       caption.textContent = (index + 1) + ' · ' + item.width + '×' + item.height;
       row.append(check, preview, caption);
+      if (showImageInfo?.checked) {
+        const info = imageFileInfo(item);
+        const file = document.createElement('small'); file.className = 'file-info';
+        file.textContent = info ? imageTypeLabel(info.fileType) + ' · ' + imageByteLabel(info.byteLength)
+          : item.fileInfoError || 'File format/size not measured.';
+        caption.append(document.createElement('br'), file);
+      }
       if (!review) {
         const note = document.createElement('small'); note.className = 'grouping-note';
         note.textContent = item.captureError || (item.saveState === 'saved' ? 'Saved locally.'
@@ -372,6 +410,7 @@
     if (busy) for (const control of document.querySelectorAll<HTMLButtonElement | HTMLInputElement>('button,input')) control.disabled = true;
     exportButton.disabled = busy || entries.length === 0;
     updateSelection();
+    updateImageInformation();
   }
   async function refresh(action = 'images'): Promise<void> {
     let state = await send(action);
@@ -381,6 +420,8 @@
       for (const page of entries.flatMap(originalPages)) {
         if (byUrl.get(page.url)?.reencoded) page.reencoded = true;
         const entry = byUrl.get(page.url);
+        if (entry?.fileType) page.fileType = entry.fileType;
+        if (entry?.byteLength) page.byteLength = entry.byteLength;
         if (entry?.saveState) { page.saveState = entry.saveState; page.saveError = entry.saveError; }
       }
       for (const page of entries) {
@@ -393,6 +434,7 @@
       excludedOnly = false;
       if (review) document.getElementById('auto-summary')!.textContent = 'Automatic analysis proposes all groups and sets aside nonmatching images. Check exclusions before merging.';
       entries = state.entries;
+      lastExportInfo = '';
     }
     generation = state.generation;
     missing = state.missing;
@@ -465,6 +507,23 @@
   titleInput.oninput = () => { void safe(async () => { await send('title', { title: titleInput.value }); }); };
 
   if (review) {
+    if (measureFiles) measureFiles.onclick = () => {
+      const pages = entries.filter(page => page.selected && !imageFileInfo(page));
+      if (!pages.length) { updateImageInformation(); setStatus('All selected image files are measured.'); return; }
+      runReviewTask(pages, 'Measuring selected image files. Capture is paused...', async verify => {
+        let failed = 0;
+        for (const page of pages) {
+          try {
+            page.bytes = page.bytes ?? (page.url.startsWith('blob:')
+              ? await readCapturedBlob(tabId, generation, page.url) : await fetchImageBytes(page.url));
+            page.fileType = imageExtension(page.bytes); page.byteLength = page.bytes.length;
+            page.fileInfoError = undefined;
+          } catch (error) { failed++; page.fileInfoError = 'File measurement failed: ' + String(error); }
+        }
+        await verify(); updateImageInformation();
+        setStatus(failed ? failed + ' file(s) could not be measured. The average covers measured selected files only.' : 'Selected image files measured.');
+      });
+    };
     hideExcluded!.onchange = () => { if (!busy) { excludedOnly = false; render(); } };
     reviewExcludedButton!.onclick = () => { if (!busy) { excludedOnly = !excludedOnly; render(); } };
     autoButton!.onclick = () => {
@@ -608,6 +667,8 @@
     if (!selected.length) { setStatus('Select at least one image.'); return; }
     const unavailable = unavailableBlob(selected);
     if (unavailable) { setStatus(unavailable); return; }
+    const options: ImageExportOptions = { convertToJpeg: convertJpeg?.checked ?? false,
+      jpegEngine: (jpegEngine?.value || 'builtin') as JpegEngine };
     try {
       if (numberedPageGroups(entries).length) {
         setStatus('Use Merge numbered pages before exporting, or assign different numbers to keep images separate.'); return;
@@ -632,7 +693,12 @@
           await refresh();
           throw new Error('New images were found. Review them before exporting.');
         }
-        await exportArchive(selected, titleInput.value, setStatus);
+        const exported = await exportArchive(selected, titleInput.value, setStatus, options);
+        lastExportInfo = 'Last successful export: ' + exported.formats.map(imageTypeLabel).join(', ')
+          + '. Average: ' + imageByteLabel(exported.totalBytes / exported.imageCount) + '. Total image data: ' + imageByteLabel(exported.totalBytes) + '.';
+        if(exported.encoders.length)lastExportInfo+=' Encoder: '+exported.encoders.join(', ')+'.';
+        const encoderStatus=document.getElementById('jpeg-engine-status');
+        if(encoderStatus && exported.encoders.length)encoderStatus.textContent='Last successful export encoder: '+exported.encoders.join(', ')+'. JPEG quality 97 / 4:4:4.';
         // Clear only derived thumbnails, only after Firefox confirms the download.
         // Preserve captured originals and review edits for undo/re-export.
         if (browser.runtime?.sendMessage) {
@@ -661,7 +727,7 @@
       if (tab?.id === undefined || !/^https?:/.test(tab.url || '')) throw new Error('Open an HTTP(S) chapter tab first.');
       tabId = tab.id;
       sourceUrl = tab.url;
-      await browser.scripting.executeScript({ target: { tabId }, files: ['navigationScope.js', 'content.js'] });
+      await browser.scripting.executeScript({ target: { tabId }, files: ['imageInfo.js', 'navigationScope.js', 'content.js'] });
       titleInput.value = new URL(tab.url).pathname.split('/').filter(Boolean).slice(-2).join(' - ') || 'chapter';
     }
     await refresh('status');

@@ -6,6 +6,8 @@
   keepSeparate?: boolean;
   previewUrl?: string; captureError?: string; reencoded?: boolean;
   saveState?: 'pending' | 'saved' | 'error'; saveError?: string;
+  fileType?: string; byteLength?: number;
+  fileInfoError?: string;
 };
 
 function originalPages(page: ReviewPage): ReviewPage[] {

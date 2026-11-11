@@ -97,6 +97,119 @@ The saved capture belongs to its source tab identifier for the current Firefox
 session; a full Firefox restart clears it to prevent tab-identifier collisions.
 Review-only edits such as merges and numbering still live in the review tab.
 
+## File information and JPEG export
+
+Enable **Show file formats and average size** in the popup or review tab to display
+each file's detected format and byte size, plus format counts, arithmetic mean and
+total for included images. Sizes are file bytes (KiB/MiB), not pixel dimensions or
+thumbnail sizes. Excluded images do not affect the mean. Partial coverage is
+explicitly labelled, for example 12/36 measured; unknown files are not counted as
+zero. The popup uses captured metadata alongside its thumbnail cache, so displaying
+statistics does not force full image transfers on reopening.
+
+Formats are signature-checked. Blob captures record metadata locally during save,
+and review merges use their new output bytes. Remote HTTP(S) files or older
+captures may initially have unknown metadata. In review, **Measure selected files
+(pauses capture)** requests the needed image-server access and reads unknown
+selected files. Failures remain visible and the average stays partial. URL suffixes
+are never used to guess file type or size.
+
+In the review tab, enable **Export as JPEG — quality 97, 4:4:4** to use this fixed
+conversion profile while building the CBZ. It is off by default. Every selected
+file is re-encoded, including existing JPEGs, so original 4:2:0/4:2:2 sampling cannot
+silently survive the conversion option. Leaving conversion off preserves captured
+file bytes. PNG/WebP/AVIF/GIF/JPEG inputs are decoded locally at native dimensions,
+without scaling/cropping. Transparency is composited over white and animated inputs
+produce one decoded frame. JPEG remains lossy and does not preserve source metadata;
+re-encoding cannot recover detail already lost in the source.
+
+Canvas is used only to obtain opaque RGBA pixels, not to encode JPEG: the browser
+does not expose explicit chroma-subsampling control. The locally bundled encoder
+from **jpeg-js 0.4.4** runs in a dedicated worker at quality **97** on that encoder's
+scale. Its Y/Cb/Cr components use 1×1 sampling, meaning **4:4:4**. The extension
+verifies the actual output SOF frame sampling and dimensions before adding a file
+to the CBZ, failing export if they differ. Tests run the real packaged encoder with
+dynamic code generation disabled, compare output against quality-97 reference bytes,
+inspect sampling factors, and decode output files. Encoder source/license are
+retained in the packaged jpeg-encoder.js; only the encoder is loaded, not its decoder.
+Reference: [jpeg-js source](https://github.com/jpeg-js/jpeg-js/blob/master/lib/encoder.js).
+
+The captured source files, preview cache and merge undo data are not replaced by
+JPEG output. Unchecking the option restores the ordinary format-preserving export.
+Conversion/decode/Canvas failures abort export, rather than dropping pages or merely
+renaming file extensions. The existing Canvas limits apply (32767 pixels per side,
+64 megapixels). Each bitmap/Canvas is released before worker encoding; RGBA is
+transferred rather than copied, and each worker is terminated after success/failure.
+The worker has a two-minute limit per image. Pure JavaScript encoding can be slower
+and larger than native Canvas JPEG, but does not block the review UI thread.
+The optional info
+panel reports actual mean/total image bytes for the last successful export, separate
+from the current source-file statistics; ZIP container overhead is excluded.
+
+### Optional ImageMagick encoder on Windows
+
+JPEG conversion offers two engines and an automatic choice:
+
+- **Automatic (ImageMagick if connected)**: try the native connector; use the built-in
+  worker when unavailable or if conversion/profile validation fails. After a failure,
+  the remaining files in that export use the built-in engine without retrying the host.
+- **Built-in**: always use the local jpeg-js worker; no external installation is needed.
+- **ImageMagick (required)**: use the native engine or abort with an explicit error.
+
+Both engines use quality 97, 4:4:4, unchanged dimensions and white compositing.
+Outputs are not expected to be byte-identical or have equal sizes. The actual engine
+used appears after export, including mixed native/built-in output after a fallback.
+
+Installing ImageMagick alone does not expose it to Firefox. Install the small
+project-specific Native Messaging connector once, from the project directory:
+
+```powershell
+npm run native:install -- --dry-run
+npm run native:install
+```
+
+This requires Windows, Node.js 20+ and ImageMagick 7 on PATH. To select an executable:
+
+```powershell
+npm run native:install -- --magick "C:\Program Files\ImageMagick-7.1.2-Q16-HDRI\magick.exe"
+```
+
+The installer copies the host to `%LOCALAPPDATA%\WebtoonToCBZ\ImageMagickHost` and
+registers only `HKCU\Software\Mozilla\NativeMessagingHosts\webtoon_to_cbz.imagemagick`.
+It pins absolute Node/ImageMagick paths, requires no administrator privileges and
+allows only extension ID `webtoon-to-cbz@example.local`. No resident service is
+installed. A conflicting registration is not overwritten. Dry-run changes nothing.
+
+Reload the extension, open review, choose JPEG conversion, click **Check ImageMagick**
+and grant the optional **nativeMessaging** permission. This check confirms the
+connector, not merely that magick.exe exists. Automatic mode can safely remain on
+without this permission/connector; it then uses the built-in engine. Explicit
+ImageMagick mode reports missing setup instead of silently changing engines.
+
+```powershell
+npm run test:native
+npm run native:uninstall
+```
+
+`test:native` checks the real executable's quality/sampling using ImageMagick identify,
+as well as the native stdio protocol; it skips executable tests when ImageMagick is
+not installed. The native connector has been exercised through its real process
+protocol locally; Firefox-to-host integration still needs manual validation.
+
+Only RGBA pixels and dimensions cross this local connection. The fixed native
+protocol accepts no URLs, input/output paths, shell commands or arbitrary options.
+ImageMagick is spawned with an argv array, shell disabled and hidden Windows
+processes. The fixed profile is `-quality 97 -sampling-factor 1x1,1x1,1x1 -interlace none`.
+Input is raw RGBA on stdin and JPEG is returned on stdout in bounded base64 chunks
+below Firefox's native response limit. No image upload or explicit image temp files
+are used. Limits: 64 megapixels / 32767 pixels per side, 128 MiB output, two minutes
+per conversion, bounded ImageMagick pixel-cache resources. A host is disconnected
+after each image/check, and subprocesses are stopped on disconnect. The preview
+cache/source archive are unaffected by native encoding.
+
+References: [Mozilla Native Messaging](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/Native_messaging),
+[ImageMagick options](https://imagemagick.org/command-line-options/).
+
 ## Manual vertical merging
 
 ### Automatic ratio analysis
@@ -348,7 +461,7 @@ inserted or the user never reached; manually verify completeness.
 ## Export and data flow
 
 For HTTP(S) URLs, the review tab fetches selected URLs sequentially, with a 30-second response
-timeout per image, and checks JPEG, PNG, GIF, WebP, or AVIF signatures. It preserves
+timeout per image, and checks JPEG, PNG, GIF, WebP, or AVIF signatures. By default it preserves
 the returned bytes and names entries `0001.jpg`, `0002.png`, etc. HTTP failures,
 unsupported data (including HTML challenges), permission refusal, and interrupted
 downloads are reported. No partial CBZ is exported after an image fetch failure.
@@ -368,6 +481,8 @@ complete CBZ are assembled in memory, which limits very large chapters.
 - `activeTab`: access to the tab explicitly selected through the extension action.
 - `scripting`: inject the capture script into that tab.
 - `downloads`: save the CBZ and observe completion/interruption.
+- Optional `nativeMessaging`: only for the user-installed local ImageMagick connector.
+  Requested by Check ImageMagick; ordinary built-in conversion does not require it.
 - Optional HTTP(S) host permissions: automatic continuation requests the current
   reader's origin at Start/enabling the checkbox. Export/merge may request the
   selected image server origins separately. No global host access is required.
@@ -407,6 +522,12 @@ complete CBZ are assembled in memory, which limits very large chapters.
 - `src/navigationScope.ts`: shared origin/chapter identity checks and pagination normalization.
 - `src/popup.ts`: popup/review controls and source-document validation.
 - `src/export.ts`: signature checks, filename sanitation and CBZ saving.
+- `src/imageInfo.ts`: shared signature detection and file-size statistics, also
+  used for durable capture metadata without loading full images in the popup.
+- `src/jpegEncoder.ts` and `src/jpegWorker.ts`: local JPEG quality-97 / 4:4:4
+  worker encoding, output-frame verification and cleanup.
+- `src/imageMagick.ts` and `native-host/`: optional local native encoding, explicit
+  mode selection, Automatic fallback, bounded IPC, and per-user Windows setup.
 - `src/imageMerger.ts`: Canvas merging and reversible source retention.
 - `src/pageGrouping.ts`: native border inspection, numbering suggestions and group validation.
 - `src/autoGrouping.ts`: automatic ratio-based grouping and reviewable exclusion planning.

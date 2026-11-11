@@ -26,6 +26,7 @@ function captureFixture(options = {}) {
     browser: { runtime: { sendMessage: options.sendMessage ?? (async () => { throw new Error('Page-context reader unavailable in fixture'); }), onMessage: { addListener(callback) { handler = callback; } } } },
   });
   const source = fs.readFileSync('dist/content.js', 'utf8');
+  vm.runInContext(fs.readFileSync('dist/imageInfo.js', 'utf8'), context);
   vm.runInContext(fs.readFileSync('dist/navigationScope.js', 'utf8'), context);
   vm.runInContext(source, context);
   function image(url, loaded = true, height = 1200, top = 0) {
@@ -98,7 +99,8 @@ test('new documents have distinct capture identifiers', async () => {
 function exporterFixture(responses, downloadState = 'complete') {
   const saved = [];
   let archive;
-  const browser = { downloads: {
+  const workerCalls=[], workerClosed=[];
+  const browser = { runtime: { getURL: path => path }, downloads: {
     async download() { saved.push(archive); return 7; },
     onChanged: { addListener() {}, removeListener() {} },
     async search() { return [{ state: downloadState }]; },
@@ -108,13 +110,33 @@ function exporterFixture(responses, downloadState = 'complete') {
     file(name, bytes) { this.zip.file(name, bytes); }
     async generateAsync() { return new Blob([await this.zip.generateAsync({ type: 'uint8array', compression: 'STORE' })]); }
   }
+  class CodecWorker {
+    constructor(url) {
+      assert.equal(url,'jpegWorker.js');
+      const owner=this;
+      this.context=vm.createContext({Uint8Array,ArrayBuffer,btoa,
+        importScripts(file){vm.runInContext(fs.readFileSync('dist/'+file,'utf8'),owner.context);},
+        postMessage(message,transfer){const data=structuredClone(message,{transfer});queueMicrotask(()=>owner.onmessage({data}));},
+      },{codeGeneration:{strings:false,wasm:false}});
+      vm.runInContext(fs.readFileSync('dist/jpegWorker.js','utf8'),this.context);
+    }
+    postMessage(message,transfer){
+      workerCalls.push({width:message.width,height:message.height});
+      const data=structuredClone(message,{transfer});
+      queueMicrotask(()=>this.context.onmessage({data}));
+    }
+    terminate(){workerClosed.push(true);}
+  }
   const context = vm.createContext({
-    JSZip: Zip, Uint8Array, DataView, Blob, AbortSignal, browser, atob,
+    JSZip: Zip, Uint8Array, DataView, Blob, AbortSignal, browser, atob, btoa, Worker:CodecWorker,setTimeout,clearTimeout,
     URL: { createObjectURL(blob) { archive = blob; return 'blob:test'; }, revokeObjectURL() {} },
     fetch: async url => responses[url],
   });
+  vm.runInContext(fs.readFileSync('dist/imageInfo.js', 'utf8'), context);
+  vm.runInContext(fs.readFileSync('dist/jpegEncoder.js', 'utf8'), context);
+  vm.runInContext(fs.readFileSync('dist/imageMagick.js', 'utf8'), context);
   vm.runInContext(fs.readFileSync('dist/export.js', 'utf8'), context);
-  return { context, saved };
+  return { context, saved, workerCalls, workerClosed };
 }
 
 test('signature validation and Windows filenames', () => {
@@ -188,6 +210,10 @@ function mergerFixture(options = {}) {
       getContext() { return options.noContext ? null : {
         fillRect(...args) { draws.push(['white', ...args]); },
         drawImage(image, x, y) { draws.push([x,y,image.width,image.height]); },
+        getImageData(_x,_y,width,height) {
+          if(options.pixelError)throw new Error('Pixel read failed');
+          return {data:new Uint8ClampedArray(width*height*4).fill(255)};
+        },
       }; },
       toBlob(callback, type, quality) {
         draws.push([type,quality]);
@@ -436,6 +462,15 @@ async function reviewFixture(options = {}) {
     const automatic = new Element('input'); automatic.checked = true;
     ids.set('auto-continue', automatic);
   }
+  if(options.imageOptions) {
+    for(const id of ['show-image-info','convert-jpeg']) ids.set(id,new Element('input'));
+    ids.get('show-image-info').checked=false;ids.get('convert-jpeg').checked=false;
+    ids.set('image-info',new Element('p'));ids.set('measure-files',new Element('button'));
+  }
+  if(options.nativeOptions){
+    const engine=new Element('select');engine.value='auto';ids.set('jpeg-engine',engine);
+    ids.set('check-imagemagick',new Element('button'));ids.set('jpeg-engine-status',new Element('p'));
+  }
   ids.get('auto-tolerance').valueAsNumber=10;
   function controls() {
     const found=new Set();
@@ -471,7 +506,7 @@ async function reviewFixture(options = {}) {
     querySelectorAll:()=>controls(),
   };
   f.context.browser.permissions={request:async request=>{permissions.push(request);return options.permission!==false;}};
-  if (options.archive) f.context.browser.runtime = { sendMessage: options.archive };
+  if (options.archive) f.context.browser.runtime = { ...f.context.browser.runtime, sendMessage: options.archive };
   if (options.popup) { ids.delete('merge'); ids.delete('undo'); }
   f.context.browser.scripting={executeScript:async()=>[]};
   f.context.browser.tabs={sendMessage:async (_,message)=>{
@@ -489,7 +524,7 @@ async function reviewFixture(options = {}) {
   const idle=async()=>{
     for(let i=0;i<200;i++) {
       await new Promise(resolve=>setTimeout(resolve,2));
-      if(!ids.get('review-excluded').disabled)return;
+      if(!ids.get('review-excluded').disabled && ids.get('status').textContent)return;
     }
     throw new Error('Review operation did not finish');
   };
@@ -1270,7 +1305,7 @@ function archiveFixture() {
     onMessage: { addListener(fn) { listener = fn; } },
     onStartup: { addListener(fn) { startup = fn; } },
   } };
-  vm.runInNewContext(fs.readFileSync('dist/captureStore.js', 'utf8'), {
+  vm.runInNewContext(fs.readFileSync('dist/imageInfo.js', 'utf8') + '\n' + fs.readFileSync('dist/captureStore.js', 'utf8'), {
     browser, indexedDB: new IDBFactory(), Uint8Array, atob, btoa,
   });
   const source = { id: 'extension', frameId: 0, tab: { id: 1 }, url: 'https://test/chapter' };
@@ -1640,12 +1675,12 @@ function navigationFixture() {
       sendMessage: async (_, message) => { if (!current) throw new Error('Old document was unloaded'); return current.send(message.action, message); } },
     permissions: { contains: async ({ origins }) => granted && origins[0] === 'https://www.scan-manga.com/*' },
     scripting: { executeScript: async details => {
-      assert.deepEqual(Array.from(details.files), ['navigationScope.js','content.js']); injections++; current = pending; return [];
+      assert.deepEqual(Array.from(details.files), ['imageInfo.js','navigationScope.js','content.js']); injections++; current = pending; return [];
     } },
   };
   const context = vm.createContext({ browser, indexedDB: new IDBFactory(), Uint8Array, atob, btoa, URL,
     crypto: require('node:crypto').webcrypto });
-  for (const file of ['captureStore.js','navigationScope.js','navigation.js']) vm.runInContext(fs.readFileSync('dist/'+file,'utf8'), context);
+  for (const file of ['imageInfo.js','captureStore.js','navigationScope.js','navigation.js']) vm.runInContext(fs.readFileSync('dist/'+file,'utf8'), context);
   const uiSender = { id: 'extension', url: 'moz-extension://fixture/popup.html', tab: { id: 9 } };
   function reader(url, page, count = 2) {
     const f = scanMangaFixture(count);
@@ -1804,4 +1839,202 @@ test('denying site access starts current-document capture but leaves automatic c
   assert.equal((await nav.ui({action:'navigation-status'})).autoResume,undefined);
   assert.equal(f.ids.get('auto-continue').checked,false);
   assert.match(f.ids.get('status').textContent,/site access was not granted/);
+});
+
+test('file statistics use actual selected file bytes, report partial coverage and ignore exclusions', () => {
+  const f=exporterFixture({});
+  const summary=f.context.imageFileSummary([
+    {selected:true,fileType:'jpg',byteLength:1024},
+    {selected:true,fileType:'png',byteLength:3072},
+    {selected:true,url:'https://test/not-a-reliable-extension.jpg'},
+    {selected:false,fileType:'png',byteLength:100000000},
+  ]);
+  assert.match(summary,/JPEG × 1, PNG × 1/);
+  assert.match(summary,/Average file size: 2.0 KiB/);
+  assert.match(summary,/Measured: 2\/3/);
+  assert.equal(f.context.imageFileInfo({bytes:Uint8Array.from([255,216,255,0]),fileType:'png',byteLength:999}).fileType,'jpg');
+});
+
+test('popup statistics read source metadata from the cache without loading originals or counting thumbnail PNG bytes',async()=>{
+  const f=await cachedPopupFixture();
+  const reads=f.fullReads();
+  const popup=await reviewFixture({...f.options,imageOptions:true});await popup.idle();
+  popup.ids.get('show-image-info').checked=true;popup.ids.get('show-image-info').onchange();
+  assert.equal(popup.ids.get('image-info').hidden,false);
+  assert.match(popup.ids.get('image-info').textContent,/JPEG × 1/);
+  assert.match(popup.ids.get('image-info').textContent,/Average file size: 4 B/);
+  assert.equal(f.fullReads(),reads);
+});
+
+test('JPEG 97 / 4:4:4 export keeps dimensions, composites on white and re-encodes JPEGs without changing sources',async()=>{
+  const f=mergerFixture({sizes:[[17,19],[23,11]]});
+  const png=new Uint8Array(f.png);
+  const jpeg=Uint8Array.from([255,216,255,17,18,19,20]);
+  const pages=[{url:'png',bytes:png},{url:'jpeg',bytes:jpeg}];
+  const result=await f.context.exportArchive(pages,'JPEG chapter',()=>{},{convertToJpeg:true});
+  const zip=await JSZip.loadAsync(await f.saved[0].arrayBuffer());
+  assert.deepEqual(Object.keys(zip.files),['0001.jpg','0002.jpg']);
+  const first=await zip.file('0001.jpg').async('uint8array');
+  const second=await zip.file('0002.jpg').async('uint8array');
+  const codec=require('jpeg-js');
+  for(const [bytes,width,height] of [[first,17,19],[second,23,11]]) {
+    f.context.assertJpeg444(bytes,width,height);
+    const decoded=codec.decode(bytes,{useTArray:true});
+    assert.equal(decoded.width,width);assert.equal(decoded.height,height);
+    const expected=codec.encode({width,height,data:new Uint8Array(width*height*4).fill(255)},97).data;
+    assert.deepEqual(Buffer.from(bytes),expected); // Quality 97, not a Canvas-dependent fraction.
+  }
+  assert.notDeepEqual(second,jpeg);
+  assert.deepEqual(png,f.png);
+  assert.equal(pages[0].bytes,png);
+  assert.deepEqual(f.draws,[['white',0,0,17,19],[0,0,17,19],['white',0,0,23,11],[0,0,23,11]]);
+  assert.equal(f.closed.length,2);assert.equal(f.workerClosed.length,2);
+  assert.equal(result.totalBytes,first.length+second.length);
+});
+
+test('JPEG conversion failures abort the CBZ and release decoding resources',async()=>{
+  for(const options of [{decodeError:true},{noContext:true},{pixelError:true},{sizes:[[40000,100]]}]) {
+    const f=mergerFixture(options);
+    await assert.rejects(f.context.exportArchive([{url:'png',bytes:f.png}],'bad',()=>{},{convertToJpeg:true}));
+    assert.equal(f.saved.length,0);
+    if(!options.decodeError)assert.equal(f.closed.length,1);
+  }
+});
+
+test('review JPEG option exports the fixed 97/4:4:4 profile and reports actual exported file sizes',async()=>{
+  const f=await reviewFixture({imageOptions:true,sizes:[[17,19]],pages:[{url:'png',bytes:Uint8Array.from([137,80,78,71,13,10,26,10,42])}]});
+  f.ids.get('show-image-info').checked=true;f.ids.get('show-image-info').onchange();
+  assert.match(f.ids.get('image-info').textContent,/PNG × 1/);
+  f.ids.get('convert-jpeg').checked=true;f.ids.get('convert-jpeg').onchange();
+  let archive;
+  f.context.URL.createObjectURL=blob=>{archive=blob;return 'blob:export';};
+  f.context.browser.downloads.download=async()=>{f.saved.push(archive);return 7;};
+  f.ids.get('export').onclick();await f.idle();
+  assert.equal(f.saved.length,1);
+  const zip=await JSZip.loadAsync(await f.saved[0].arrayBuffer());
+  assert.deepEqual(Object.keys(zip.files),['0001.jpg']);
+  f.context.assertJpeg444(await zip.file('0001.jpg').async('uint8array'),17,19);
+  assert.match(f.ids.get('image-info').textContent,/Last successful export: JPEG/);
+  assert.match(f.ids.get('image-info').textContent,/PNG × 1/); // Source data was not replaced.
+});
+
+test('measuring remote files validates signatures, requests host permission and updates partial statistics',async()=>{
+  const f=await reviewFixture({imageOptions:true,pages:[{url:'https://test/image.png',bytes:undefined}]});
+  f.context.fetch=async()=>({ok:true,arrayBuffer:async()=>Uint8Array.from([255,216,255,23]).buffer});
+  f.ids.get('show-image-info').checked=true;f.ids.get('show-image-info').onchange();
+  assert.match(f.ids.get('image-info').textContent,/unknown/);
+  f.ids.get('measure-files').onclick();await f.idle();
+  assert.deepEqual(Array.from(f.permissions[0].origins),['https://test/*']);
+  assert.match(f.ids.get('image-info').textContent,/JPEG × 1/); // Actual type wins over URL suffix.
+  assert.match(f.ids.get('image-info').textContent,/Measured: 1\/1/);
+});
+
+test('the packaged JPEG worker emits real quality-97 4:4:4 JPEGs under extension CSP',async()=>{
+  const f=exporterFixture({});
+  const width=17,height=19;
+  const pixels=new Uint8ClampedArray(width*height*4);
+  for(let i=0;i<pixels.length;i+=4){pixels[i]=i%256;pixels[i+1]=(i*3)%256;pixels[i+2]=255-(i%256);pixels[i+3]=255;}
+  const expectedPixels=new Uint8Array(pixels);
+  const bytes=await f.context.encodeJpeg97(width,height,pixels);
+  assert.equal(pixels.byteLength,0); // Transfer avoids retaining a duplicate RGBA buffer.
+  const expected=require('jpeg-js').encode({width,height,data:expectedPixels},97).data;
+  assert.deepEqual(Buffer.from(bytes),expected);
+  const frame=Buffer.from(bytes).indexOf(Buffer.from([255,192]));
+  assert.ok(frame>0);
+  assert.deepEqual([bytes[frame+11],bytes[frame+14],bytes[frame+17]],[0x11,0x11,0x11]);
+  const bad=new Uint8Array(bytes);bad[frame+11]=0x22;
+  assert.throws(()=>f.context.assertJpeg444(bad,width,height),/4:4:4/);
+  assert.throws(()=>f.context.assertJpeg444(bytes,width+1,height),/dimensions/);
+  assert.equal(f.workerClosed.length,1);
+});
+
+test('worker errors abort JPEG export, terminate the worker and leave captured bytes untouched',async()=>{
+  const f=mergerFixture({sizes:[[17,19]]});
+  let terminated=0;
+  f.context.Worker=class {
+    postMessage(){queueMicrotask(()=>this.onmessage({data:{error:'Encoder unavailable'}}));}
+    terminate(){terminated++;}
+  };
+  const original=new Uint8Array(f.png);
+  await assert.rejects(f.context.exportArchive([{url:'png',bytes:original}],'bad',()=>{},{convertToJpeg:true}),/Encoder unavailable/);
+  assert.equal(f.saved.length,0);assert.equal(terminated,1);assert.equal(f.closed.length,1);
+  assert.deepEqual(original,f.png);
+});
+
+function fakeNativeConnector(f, failure) {
+  const calls=[],connections=[],closed=[];
+  f.context.browser.permissions={...f.context.browser.permissions,contains:async()=>true};
+  f.context.browser.runtime.connectNative=name=>{
+    assert.equal(name,'webtoon_to_cbz.imagemagick');connections.push(name);
+    let receive,disconnect,input,width,height,offset=0,output;
+    const port={onMessage:{addListener(fn){receive=fn;}},onDisconnect:{addListener(fn){disconnect=fn;}},
+      disconnect(){closed.push(true);},
+      postMessage(message){
+        calls.push(message.action);
+        queueMicrotask(()=>{
+          if(failure==='missing'){port.error={message:'No native host installed'};disconnect();return;}
+          let reply={id:message.id,ok:true};
+          if(message.action==='ping')Object.assign(reply,{protocol:1,quality:97,sampling:'4:4:4',version:'ImageMagick 7 test'});
+          if(message.action==='begin'){width=message.width;height=message.height;input=Buffer.alloc(width*height*4);}
+          if(message.action==='write'){
+            assert.equal(message.offset,offset);const data=Buffer.from(message.base64,'base64');data.copy(input,offset);offset+=data.length;
+          }
+          if(message.action==='encode'){
+            assert.equal(offset,input.length);output=require('jpeg-js').encode({width,height,data:input},97).data;
+            if(failure==='sampling'){const frame=output.indexOf(Buffer.from([255,192]));output[frame+11]=0x22;}
+            reply.total=output.length;
+          }
+          if(message.action==='read')Object.assign(reply,{offset:message.offset,total:output.length,
+            base64:output.subarray(message.offset,message.offset+256*1024).toString('base64')});
+          receive(reply);
+        });
+      },
+    };
+    return port;
+  };
+  return{calls,connections,closed};
+}
+
+test('ImageMagick mode transfers bounded pixels, validates JPEG output and avoids the built-in worker',async()=>{
+  const f=mergerFixture({sizes:[[17,19]]});const native=fakeNativeConnector(f);
+  const result=await f.context.exportArchive([{url:'png',bytes:f.png}],'native',()=>{},{convertToJpeg:true,jpegEngine:'imagemagick'});
+  assert.deepEqual(Array.from(result.encoders),['ImageMagick']);
+  assert.equal(f.workerCalls.length,0);assert.equal(native.connections.length,1);assert.equal(native.closed.length,1);
+  const zip=await JSZip.loadAsync(await f.saved[0].arrayBuffer());
+  f.context.assertJpeg444(await zip.file('0001.jpg').async('uint8array'),17,19);
+  assert.deepEqual(native.calls,['ping','begin','write','encode','read']);
+});
+
+test('Automatic mode falls back once per export if the native host is absent; forced mode fails explicitly',async()=>{
+  const f=mergerFixture({sizes:[[17,19],[17,19]]});const native=fakeNativeConnector(f,'missing');
+  const reports=[];
+  const result=await f.context.exportArchive([{url:'a',bytes:f.png},{url:'b',bytes:f.png}],'fallback',text=>reports.push(text),{convertToJpeg:true,jpegEngine:'auto'});
+  assert.deepEqual(Array.from(result.encoders),['Built-in']);
+  assert.equal(native.connections.length,1);assert.equal(f.workerCalls.length,2);
+  assert.ok(reports.some(text=>text.includes('using the built-in')));
+  const forced=mergerFixture({sizes:[[17,19]]});fakeNativeConnector(forced,'missing');
+  await assert.rejects(forced.context.exportArchive([{url:'a',bytes:forced.png}],'bad',()=>{},{convertToJpeg:true,jpegEngine:'imagemagick'}),/No native host/);
+  assert.equal(forced.saved.length,0);assert.equal(forced.workerCalls.length,0);
+});
+
+test('native sampling mismatch triggers Automatic fallback and cannot silently create non-4:4:4 JPEGs',async()=>{
+  const f=mergerFixture({sizes:[[17,19]]});fakeNativeConnector(f,'sampling');
+  const result=await f.context.exportArchive([{url:'a',bytes:f.png}],'safe',()=>{},{convertToJpeg:true,jpegEngine:'auto'});
+  assert.deepEqual(Array.from(result.encoders),['Built-in']);
+  const zip=await JSZip.loadAsync(await f.saved[0].arrayBuffer());
+  f.context.assertJpeg444(await zip.file('0001.jpg').async('uint8array'),17,19);
+});
+
+test('review can check the native connector and deliberately keep using the built-in mode',async()=>{
+  const f=await reviewFixture({imageOptions:true,nativeOptions:true,sizes:[[17,19]],pages:[{url:'png',bytes:Uint8Array.from([137,80,78,71,13,10,26,10,42])}]});
+  const native=fakeNativeConnector(f);
+  await f.ids.get('check-imagemagick').onclick();
+  assert.deepEqual(Array.from(f.permissions[0].permissions),['nativeMessaging']);
+  assert.match(f.ids.get('jpeg-engine-status').textContent,/Available: ImageMagick/);
+  f.ids.get('convert-jpeg').checked=true;f.ids.get('convert-jpeg').onchange();
+  assert.equal(f.ids.get('jpeg-engine').disabled,false);f.ids.get('jpeg-engine').value='builtin';
+  let archive;f.context.URL.createObjectURL=blob=>{archive=blob;return 'blob:out';};
+  f.context.browser.downloads.download=async()=>{f.saved.push(archive);return 7;};
+  f.ids.get('export').onclick();await f.idle();
+  assert.equal(f.saved.length,1);assert.equal(native.connections.length,1);assert.equal(f.workerCalls.length,1);
 });

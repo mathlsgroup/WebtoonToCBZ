@@ -2,7 +2,7 @@
   const scope = globalThis as typeof globalThis & { webtoonCaptureInstalled?: boolean };
   if (scope.webtoonCaptureInstalled) return;
   scope.webtoonCaptureInstalled = true;
-  type Entry = { url: string; order: number; width: number; height: number; selected: boolean; reencoded?: boolean; readerPage?: number; sourceUrl?: string; saveState?: 'pending' | 'saved' | 'error'; saveError?: string };
+  type Entry = { url: string; order: number; width: number; height: number; selected: boolean; reencoded?: boolean; readerPage?: number; sourceUrl?: string; saveState?: 'pending' | 'saved' | 'error'; saveError?: string; fileType?: string; byteLength?: number };
   type ReaderChapter = { key: string; total: number; offset: number };
   type ResumeState = { generation: string; entries: Entry[]; title: string; missing: number; manualOrder?: string[]; autoResume?: AutoResumePolicy; readerChapters?: ReaderChapter[] };
   let capturing = false;
@@ -133,6 +133,8 @@
     if (expectedGeneration !== generation) return false;
     const entry = records.get(url);
     if (!entry) return false;
+    entry.byteLength = bytes.length;
+    try { entry.fileType = imageExtension(bytes); } catch { entry.fileType = undefined; }
     entry.saveState = 'pending'; entry.saveError = undefined;
     pendingWrites.add(url);
     pendingSaves++;

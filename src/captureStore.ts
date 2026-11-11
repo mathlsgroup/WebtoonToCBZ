@@ -1,4 +1,4 @@
-type StoredPage = { url: string; order: number; width: number; height: number; selected: boolean; reencoded?: boolean; saveState?: 'pending' | 'saved' | 'error'; saveError?: string };
+type StoredPage = { url: string; order: number; width: number; height: number; selected: boolean; reencoded?: boolean; saveState?: 'pending' | 'saved' | 'error'; saveError?: string; fileType?: string; byteLength?: number };
 type AutoResumePolicy = { enabled: boolean; token: string; origin: string; chapterKey: string; autoPixels: boolean; includeNextChapters: boolean; pauseReason?: string };
 type StoredCapture = { generation: string; entries: StoredPage[]; title: string; missing: number; capturing: boolean; archiveError?: string; manualOrder?: string[]; previewVersion?: number; autoResume?: AutoResumePolicy };
 
@@ -60,7 +60,8 @@ async function handleArchive(message: ArchiveRequest, sender: { id?: string; fra
           enabled: stored.autoResume.enabled && message.state.capturing,
           pauseReason: message.state.capturing ? stored.autoResume.pauseReason : 'Stopped by user.' };
         const state = { ...message.state, autoResume, previewVersion: stored.previewVersion ?? 0, entries: message.state.entries.map(page => acknowledged.has(page.url)
-          ? { ...page, reencoded: acknowledged.get(page.url)!.reencoded, saveState: 'saved' as const, saveError: undefined } : page) };
+          ? { ...page, reencoded: acknowledged.get(page.url)!.reencoded, fileType: acknowledged.get(page.url)!.fileType ?? page.fileType,
+            byteLength: acknowledged.get(page.url)!.byteLength ?? page.byteLength, saveState: 'saved' as const, saveError: undefined } : page) };
         sessions.put(state, tabId!); done({ ok: true }); return;
       }
       const generation = message.generation ?? stored.generation;
@@ -142,14 +143,19 @@ async function handleArchive(message: ArchiveRequest, sender: { id?: string; fra
         if (!Number.isSafeInteger(total) || total! < 1 || total! > 64 * 1024 * 1024) { done({ error: 'Invalid complete image size.' }); return; }
         let remaining = Math.ceil(total! / (256 * 1024));
         let invalid = false;
+        let fileType: string | undefined;
         for (let start = 0; start < total!; start += 256 * 1024) {
           const part = images.get([...key, start]);
           part.onsuccess = () => {
             if (part.result?.total !== total || part.result?.data?.length !== Math.min(256 * 1024, total! - start)) invalid = true;
+            if (start === 0 && part.result?.data) {
+              try { fileType = imageExtension(part.result.data); } catch { /* Unsupported data is reported by review/export. */ }
+            }
             if (--remaining) return;
             if (invalid) { done({ error: 'Image save incomplete; not all chunks were committed.' }); return; }
             images.put({ complete: true, total }, key);
             page.saveState = 'saved'; page.saveError = undefined;
+            page.byteLength = total; page.fileType = fileType;
             sessions.put(stored, tabId!);
             done({ ok: true });
           };

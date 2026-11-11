@@ -48,7 +48,7 @@ function resumeAfterNavigation(tabId: number): Promise<void> {
           return;
         }
       } catch { /* A full navigation destroys the previous content script. */ }
-      await browser.scripting.executeScript({ target: { tabId }, files: ['navigationScope.js', 'content.js'] });
+      await browser.scripting.executeScript({ target: { tabId }, files: ['imageInfo.js', 'navigationScope.js', 'content.js'] });
       const fresh = await authorizedNavigationState(tabId, token);
       if ('error' in fresh) { await navigationPause(tabId, token, fresh.error); return; }
       const result = await browser.tabs.sendMessage(tabId, { action: 'auto-resume',

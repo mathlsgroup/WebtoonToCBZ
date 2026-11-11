@@ -3,23 +3,29 @@ declare const JSZip: new () => {
   generateAsync(options: { type: 'blob'; compression: 'STORE' }): Promise<Blob>;
 };
 
-// Check file signatures rather than trusting URL extensions or HTTP headers.
-function imageExtension(bytes: Uint8Array): string {
-  const ascii = (start: number, end: number) => String.fromCharCode(...bytes.subarray(start, end));
-  if (bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) return 'jpg';
-  if ([137,80,78,71,13,10,26,10].every((value, i) => bytes[i] === value)) return 'png';
-  if (ascii(0, 6) === 'GIF87a' || ascii(0, 6) === 'GIF89a') return 'gif';
-  if (ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP') return 'webp';
-  if (ascii(4, 8) === 'ftyp') {
-    const boxSize = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0);
-    if (boxSize >= 16 && boxSize <= bytes.length) {
-      for (let offset = 8; offset + 4 <= boxSize; offset += 4) {
-        if (offset === 12) continue; // Minor version is not a brand.
-        if (['avif', 'avis'].includes(ascii(offset, offset + 4))) return 'avif';
-      }
+type ImageExportOptions = { convertToJpeg?: boolean; jpegEngine?: JpegEngine };
+
+async function jpegImageBytes(bytes: Uint8Array,engine: JpegEngine='builtin',nativeState: {unavailable?:boolean}={},
+  report:(message:string)=>void=()=>{},used:(encoder:string)=>void=()=>{}): Promise<Uint8Array> {
+  imageExtension(bytes);
+  let bitmap: ImageBitmap | undefined = await createImageBitmap(new Blob([new Uint8Array(bytes)]));
+  let canvas: HTMLCanvasElement | undefined;
+  try {
+    const { width, height } = bitmap;
+    if (!width || !height || width > 32767 || height > 32767 || width * height > 64 * 1024 * 1024) {
+      throw new Error('JPEG conversion exceeds the Canvas safety limit (32767 pixels per side, 64 megapixels).');
     }
-  }
-  throw new Error('Unsupported or invalid image data (JPEG, PNG, GIF, WebP or AVIF required).');
+    canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('JPEG Canvas allocation failed.');
+    context.fillStyle = '#ffffff'; context.fillRect(0, 0, width, height);
+    context.drawImage(bitmap, 0, 0);
+    const pixels = context.getImageData(0, 0, width, height).data;
+    // Release decoded resources before transferring RGBA pixels to the worker.
+    bitmap.close(); bitmap = undefined; canvas.width = 0; canvas.height = 0; canvas = undefined;
+    const result=await encodeChosenJpeg(width,height,pixels,engine,nativeState,report);
+    used(result.encoder);return result.bytes;
+  } finally { bitmap?.close(); if (canvas) { canvas.width = 0; canvas.height = 0; } }
 }
 
 function archiveFilename(input: string): string {
@@ -40,8 +46,13 @@ async function fetchImageBytes(url: string): Promise<Uint8Array> {
   return bytes;
 }
 
-async function exportArchive(urls: (string | { url: string; bytes?: Uint8Array })[], title: string, report: (message: string) => void): Promise<void> {
+async function exportArchive(urls: (string | { url: string; bytes?: Uint8Array })[], title: string, report: (message: string) => void,
+  options: ImageExportOptions = {}): Promise<{ imageCount: number; totalBytes: number; formats: string[]; encoders: string[] }> {
   const zip = new JSZip();
+  let totalBytes = 0;
+  const formats = new Set<string>();
+  const encoders = new Set<string>();
+  const nativeState: {unavailable?:boolean}={};
   for (const [index, page] of urls.entries()) {
     report('Fetching image ' + (index + 1) + '/' + urls.length + '... Keep this review tab open.');
     let bytes: Uint8Array;
@@ -51,6 +62,13 @@ async function exportArchive(urls: (string | { url: string; bytes?: Uint8Array }
     let extension: string;
     try { extension = imageExtension(bytes); }
     catch { throw new Error('Image ' + (index + 1) + ' has unsupported or invalid data. No archive exported.'); }
+    if (options.convertToJpeg) {
+      report('Preparing JPEG image ' + (index + 1) + '/' + urls.length + '...');
+      try { bytes = await jpegImageBytes(bytes,options.jpegEngine ?? 'builtin',nativeState,report,encoder=>encoders.add(encoder)); }
+      catch (error) { throw new Error('Image ' + (index + 1) + ': JPEG conversion failed: ' + String(error) + '. No archive exported.'); }
+      extension = 'jpg';
+    }
+    totalBytes += bytes.length; formats.add(extension);
     zip.file(String(index + 1).padStart(4, '0') + '.' + extension, bytes);
   }
   const blob = await zip.generateAsync({ type: 'blob', compression: 'STORE' });
@@ -73,5 +91,6 @@ async function exportArchive(urls: (string | { url: string; bytes?: Uint8Array }
       }).catch((error: unknown) => { cleanup(); reject(error); });
     });
     report('Saved ' + filename + ' (' + urls.length + ' images).');
+    return { imageCount: urls.length, totalBytes, formats: [...formats], encoders: [...encoders] };
   } finally { URL.revokeObjectURL(objectUrl); }
 }

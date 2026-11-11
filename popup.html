@@ -5,8 +5,10 @@
 <label><input id="auto-continue" type="checkbox" checked> Automatic continuation: include following chapters in this tab (site access required).</label>
 <div class="buttons"><button id="start">Start new capture</button><button id="stop">Stop</button><button id="refresh">Refresh</button></div>
 <label>CBZ filename <input id="title" type="text" placeholder="Series - 0280"></label>
+<label><input id="show-image-info" type="checkbox"> Show file formats and average size</label>
+<p id="image-info" hidden aria-live="polite"></p>
 <div id="list"></div>
 <p class="popup-help">Detected images are saved locally. After navigation, reopen the extension to review the saved capture. Start new capture replaces it. Wait for local saving before leaving. Save only images you are authorized to archive.</p>
 <button id="export" disabled>Open review and export tab</button>
-<script src="imageMerger.js"></script><script src="export.js"></script><script src="capturedBlobs.js"></script><script src="popup.js"></script>
+<script src="imageInfo.js"></script><script src="imageMerger.js"></script><script src="export.js"></script><script src="capturedBlobs.js"></script><script src="popup.js"></script>
 </body></html>
