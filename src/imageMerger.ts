@@ -1,6 +1,7 @@
 ﻿type ReviewPage = {
   url: string; order: number; width: number; height: number; selected: boolean;
   bytes?: Uint8Array; sources?: ReviewPage[];
+  pageNumber?: number; groupingNote?: string;
 };
 
 function originalPages(page: ReviewPage): ReviewPage[] {
@@ -73,7 +74,7 @@ async function mergeImagesVertically(sources: ReviewPage[]): Promise<ReviewPage>
     const bytes = new Uint8Array(await blob.arrayBuffer());
     if (imageExtension(bytes) !== (type === 'image/jpeg' ? 'jpg' : 'png')) throw new Error('Unexpected canvas output format.');
     return { url: URL.createObjectURL(blob), order: sources[0].order, width, height,
-      selected: true, bytes, sources };
+      selected: true, bytes, sources, pageNumber: sources[0].pageNumber };
   } catch (error) {
     throw new Error('Merge failed: ' + (error instanceof Error ? error.message : String(error)));
   } finally {

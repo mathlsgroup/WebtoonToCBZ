@@ -14,8 +14,15 @@
   const mergeSelected = new Set<string>();
   const mergeButton = document.getElementById('merge') as HTMLButtonElement | null;
   const undoButton = document.getElementById('undo') as HTMLButtonElement | null;
+  const numberedMergeButton = document.getElementById('merge-numbered') as HTMLButtonElement | null;
+  const detectButton = document.getElementById('detect') as HTMLButtonElement | null;
   const objectUrls = new Set<string>();
   const mergeHistory: string[] = [];
+  function ensurePageNumbers(): void {
+    let next = entries.reduce((max, page) => Number.isSafeInteger(page.pageNumber)
+      ? Math.max(max, page.pageNumber!) : max, 0) + 1;
+    for (const page of entries) if (page.selected && page.pageNumber === undefined) page.pageNumber = next++;
+  }
   function updateSelection(): void {
     if (!mergeButton || !undoButton) return;
     let message = 'Select at least two consecutive included pages with the Merge checkboxes.';
@@ -25,6 +32,24 @@
     mergeButton.disabled = busy || !valid;
     undoButton.disabled = busy || !entries.some(page => page.sources);
     document.getElementById('selection')!.textContent = entries.length + ' pages. ' + message;
+    try {
+      const groups = numberedPageGroups(entries);
+      numberedMergeButton!.disabled = busy || !groups.length;
+      document.getElementById('numbering')!.textContent = groups.length
+        ? groups.length + ' numbered group(s) ready to merge. Check the assignments first.'
+        : 'Edit page numbers or use Suggest page numbers to prepare groups.';
+    } catch (error) {
+      numberedMergeButton!.disabled = true;
+      document.getElementById('numbering')!.textContent = String(error);
+    }
+    detectButton!.disabled = busy || !entries.some(page => page.selected);
+    const counts = new Map<number, number>();
+    for (const page of entries) if (page.selected && page.pageNumber !== undefined) {
+      counts.set(page.pageNumber, (counts.get(page.pageNumber) ?? 0) + 1);
+    }
+    Array.from(list.children).forEach((row, index) => {
+      row.classList.toggle('numbered-group', entries[index].selected && (counts.get(entries[index].pageNumber!) ?? 0) > 1);
+    });
   }
   function syncOrder(): Promise<State> {
     return send('reorder', { urls: entries.flatMap(originalPages).map(page => page.url) });
@@ -46,7 +71,59 @@
   async function safe(action: () => Promise<void>): Promise<void> {
     try { await action(); } catch (error) { setStatus(String(error)); }
   }
+  function runReviewTask(pages: Entry[], message: string, task: (verify: () => Promise<void>) => Promise<void>): void {
+    if (busy) return;
+    const origins = [...new Set(pages.filter(page => !page.bytes).map(page => new URL(page.url).origin + '/*'))];
+    // Host access must be requested in the click handler, before the first await.
+    const permission = browser.permissions.request({ origins });
+    busy = true; render(); setStatus(message);
+    void safe(async () => {
+      const verify = async (): Promise<void> => {
+        const state = await send('status');
+        if (state.generation !== generation) {
+          await refresh(); throw new Error('Capture changed. Review the new list before continuing.');
+        }
+      };
+      try {
+        if (!await permission) throw new Error('Image host access was not granted.');
+        const state = await send('stop');
+        if (state.generation !== generation) {
+          await refresh(); throw new Error('Capture changed. Review the new list before continuing.');
+        }
+        await task(verify);
+      } finally {
+        busy = false;
+        for (const control of document.querySelectorAll<HTMLButtonElement | HTMLInputElement>('button,input')) control.disabled = false;
+        render();
+      }
+    });
+  }
+  function mergeGroups(groups: Entry[][]): void {
+    runReviewTask(groups.flat(), 'Merging images. Keep this review tab open...', async verify => {
+      const created: Entry[] = [];
+      let committed = false;
+      try {
+        let result = entries;
+        for (const [index, sources] of groups.entries()) {
+          setStatus('Merging group ' + (index + 1) + '/' + groups.length + '...');
+          const merged = await mergeImagesVertically(sources);
+          created.push(merged);
+          result = replaceMergedPages(result, sources, merged);
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
+        await verify();
+        entries = result;
+        for (const page of created) { objectUrls.add(page.url); mergeHistory.push(page.url); }
+        committed = true; mergeSelected.clear();
+        setStatus('Merged ' + groups.length + ' group(s). Check Preview; Undo merge restores the sources.');
+      } finally {
+        // Failed batches leave every row intact and release provisional images.
+        if (!committed) created.forEach(page => URL.revokeObjectURL(page.url));
+      }
+    });
+  }
   function render(): void {
+    if (review) ensurePageNumbers();
     list.replaceChildren();
     entries.forEach((item, index) => {
       const row = document.createElement('div');
@@ -55,7 +132,7 @@
       check.type = 'checkbox'; check.checked = item.selected;
       check.setAttribute('aria-label', 'Include page ' + (index + 1));
       check.onchange = () => {
-        includeReviewPage(item, check.checked); updateSelection();
+        includeReviewPage(item, check.checked); render();
         void safe(async () => { for (const source of originalPages(item)) { source.selected = item.selected; await send('select', { url: source.url, selected: item.selected }); } });
       };
       const preview = document.createElement('img');
@@ -64,6 +141,19 @@
       caption.textContent = (index + 1) + ' · ' + item.width + '×' + item.height;
       row.append(check, preview, caption);
       if (review) {
+        const numberLabel = document.createElement('label'); numberLabel.className = 'page-number';
+        const number = document.createElement('input');
+        number.type = 'number'; number.min = '1'; number.step = '1';
+        number.value = item.pageNumber === undefined ? '' : String(item.pageNumber);
+        number.disabled = busy || !item.selected;
+        number.setAttribute('aria-label', 'Page number for image ' + (index + 1));
+        number.oninput = () => {
+          item.pageNumber = number.valueAsNumber; item.groupingNote = 'Manual assignment';
+          note.textContent = item.groupingNote; updateSelection();
+        };
+        numberLabel.append('Page number', number); row.append(numberLabel);
+        const note = document.createElement('small'); note.className = 'grouping-note';
+        note.textContent = item.groupingNote ?? ''; caption.append(document.createElement('br'), note);
         const selectLabel = document.createElement('label');
         const select = document.createElement('input'); select.type = 'checkbox';
         select.checked = mergeSelected.has(item.url); select.disabled = busy;
@@ -138,30 +228,41 @@
       const page = [...mergeHistory].reverse().map(url => entries.find(entry => entry.url === url)).find(entry => entry?.sources);
       if (page && !busy) undo(page);
     };
+    detectButton!.onclick = () => {
+      const pages = entries.filter(page => page.selected);
+      runReviewTask(pages, 'Analyzing image borders. Keep this review tab open...', async verify => {
+        const edges = new Map<string, PageEdges>();
+        const failures = new Map<string, string>();
+        for (const [index, page] of pages.entries()) {
+          const message = 'Analyzing image ' + (index + 1) + '/' + pages.length + '...';
+          setStatus(message); document.getElementById('numbering')!.textContent = message;
+          try { edges.set(page.url, await inspectPageEdges(page)); }
+          catch (error) { failures.set(page.url, 'Analysis failed: ' + String(error) + '. Check manually.'); }
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
+        await verify();
+        for (const suggestion of suggestPageNumbers(entries, edges)) {
+          suggestion.page.pageNumber = suggestion.pageNumber;
+          suggestion.page.groupingNote = failures.get(suggestion.page.url) ?? suggestion.note;
+        }
+        setStatus('Page numbers suggested. Review and correct them, then click Merge numbered pages.'
+          + (failures.size ? ' ' + failures.size + ' image(s) could not be analyzed and were kept separate.' : ''));
+      });
+    };
+    numberedMergeButton!.onclick = () => {
+      if (busy) return;
+      try {
+        const groups = numberedPageGroups(entries);
+        if (!groups.length) { setStatus('Give consecutive images the same page number first.'); return; }
+        mergeGroups(groups);
+      } catch (error) { setStatus(String(error)); }
+    };
     mergeButton!.onclick = () => {
       if (busy) return;
       let sources: Entry[];
       try { sources = mergeSelection(entries, mergeSelected); }
       catch (error) { setStatus(String(error)); return; }
-      const origins = [...new Set(sources.flatMap(originalPages).filter(page => !page.bytes).map(page => new URL(page.url).origin + '/*'))];
-      const permission = browser.permissions.request({ origins });
-      busy = true; render(); setStatus('Merging images. Keep this review tab open...');
-      void safe(async () => {
-        try {
-          if (!await permission) throw new Error('Image host access was not granted.');
-          const state = await send('stop');
-          if (state.generation !== generation) { await refresh(); throw new Error('Capture changed. Select pages again.'); }
-          const merged = await mergeImagesVertically(sources);
-          objectUrls.add(merged.url); mergeHistory.push(merged.url);
-          entries = replaceMergedPages(entries, sources, merged);
-          mergeSelected.clear();
-          setStatus('Merged ' + sources.length + ' pages into ' + merged.width + ' x ' + merged.height + '. Originals are available with Undo merge.');
-        } finally {
-          busy = false;
-          for (const control of document.querySelectorAll<HTMLButtonElement | HTMLInputElement>('button,input')) control.disabled = false;
-          render();
-        }
-      });
+      mergeGroups([sources]);
     };
   }
 
@@ -175,6 +276,11 @@
     }
     const selected = entries.filter(entry => entry.selected);
     if (!selected.length) { setStatus('Select at least one image.'); return; }
+    try {
+      if (numberedPageGroups(entries).length) {
+        setStatus('Use Merge numbered pages before exporting, or assign different numbers to keep images separate.'); return;
+      }
+    } catch (error) { setStatus(String(error)); return; }
     // Request only image origins, directly inside the user gesture.
     const origins = [...new Set(selected.filter(page => !page.bytes).map(page => new URL(page.url).origin + '/*'))];
     busy = true;

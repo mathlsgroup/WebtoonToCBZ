@@ -46,6 +46,36 @@ not silently export stale data.
 
 ## Manual vertical merging
 
+The review toolbar stays visible while scrolling. Each image has an editable
+**Page number** column. Give consecutive included strips the same number, then
+click **Merge numbered pages** to apply all groups at once. Number labels do not
+sort the list: the current reading order remains authoritative, and CBZ filenames
+are numbered sequentially. Repeated numbers across nonconsecutive rows are rejected,
+including groups interrupted by excluded images. Pending groups must be merged
+or assigned separate numbers before export.
+
+**Suggest page numbers** downloads/decodes included images locally, then proposes
+numbers without merging. It replaces current assignments, so run it before making
+manual corrections. It looks for consecutive landscape strips starting with a
+white top border and ending with a white bottom border, whose combined height is
+greater than their maximum width. Widths must agree within 5%. Portrait pages and
+already merged pages stay separate. Exclusions, unavailable images, new white top
+borders, and portrait pages interrupt a candidate group.
+
+The detector inspects the first/last three native pixel rows. One row with at least
+98% near-white pixels (RGB channels at least 245, composited over white) counts as
+a border. This tolerates slight JPEG noise but remains a heuristic: blank artwork,
+internal white gutters or borderless pages can produce wrong or missing groups.
+Check the suggestions and row notes, correct numbers manually, and then merge.
+Failed analyses stay separate with an error note; no image is removed. Cached
+source bytes are reused for merging/export without modifying them.
+
+Batch merging is transactional: if any group fails, the current list is retained
+and provisional merged images are released. Each successful group can be undone
+independently, restoring its original numbering and image bytes. After undo, use
+different numbers if the restored strips should be exported separately. Numbering,
+like merges, exists only in the current review tab. No new permissions are added.
+
 In the review tab, use the **Merge** checkboxes to select at least two consecutive,
 included pages, then click **Merge vertically**. These checkboxes are separate from
 the inclusion checkboxes. Nothing is merged automatically. Use **Preview** to inspect
@@ -125,6 +155,8 @@ The complete archive is assembled in memory, which limits very large chapters.
 - `src/content.ts`: scoped, idempotent injection, viewport observation and review state.
 - `src/popup.ts`: popup/review controls and source-document validation.
 - `src/export.ts`: signature checks, filename sanitation and CBZ saving.
+- `src/imageMerger.ts`: Canvas merging and reversible source retention.
+- `src/pageGrouping.ts`: native border inspection, numbering suggestions and group validation.
 - `scripts/build.mjs`: staged packaging and local JSZip bundling. The bundled
   setImmediate shim rejects string callbacks to comply with extension CSP;
   builds fail if the expected vendor shim changes. A regression test runs this

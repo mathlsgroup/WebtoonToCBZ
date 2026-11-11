@@ -128,7 +128,7 @@ test('signature validation and Windows filenames', () => {
 test('CBZ retains exact bytes and sequential names; HTTP and invalid data abort export', async () => {
   const first = Uint8Array.from([255,216,255,23]);
   const second = Uint8Array.from([137,80,78,71,13,10,26,10,42]);
-  const response = bytes => ({ ok: true, arrayBuffer: async () => bytes.buffer });
+  const response = bytes => ({ ok: true, arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) });
   const f = exporterFixture({ a: response(first), b: response(second) });
   const reports = [];
   await f.context.exportArchive(['a','b'], 'Chapter', text => reports.push(text));
@@ -267,4 +267,266 @@ test('excluding a nested merge also excludes restored intermediate pages', () =>
   assert.equal(a.selected,false);
   assert.equal(b.selected,false);
   assert.equal(c.selected,false);
+});
+
+function groupingFixture(options = {}) {
+  const f = mergerFixture(options);
+  vm.runInContext(fs.readFileSync('dist/pageGrouping.js', 'utf8'), f.context);
+  return f;
+}
+
+function edge(width, height, topWhite = false, bottomWhite = false) {
+  return { width, height, topWhite, bottomWhite };
+}
+
+function suggestions(f, descriptions) {
+  const pages = descriptions.map((description, index) => ({ ...f.page(String(index)), selected: description.selected ?? true }));
+  const edges = new Map(descriptions.flatMap((description, index) => description.edge ? [[String(index), description.edge]] : []));
+  return { pages, result: f.context.suggestPageNumbers(pages, edges) };
+}
+
+test('white borders tolerate JPEG gray and sparse noise, but reject content rows', () => {
+  const { context } = groupingFixture();
+  const pixels = new Uint8ClampedArray(100 * 4).fill(247);
+  for (let x = 0; x < 100; x++) pixels[x * 4 + 3] = 255;
+  pixels[0] = 0;
+  assert.equal(context.hasWhiteEdge(pixels,100),true);
+  for (let x = 0; x < 10; x++) pixels[x * 4] = 0;
+  assert.equal(context.hasWhiteEdge(pixels,100),false);
+  assert.equal(context.hasWhiteEdge(new Uint8ClampedArray(400),100),true); // Transparency over white.
+  assert.equal(context.hasWhiteEdge(new Uint8ClampedArray(),100),false);
+  assert.equal(context.hasWhiteEdge(new Uint8ClampedArray(400),0),false);
+});
+
+test('suggestions number complete portrait pages and two/three-strip groups without modifying pages', () => {
+  const f = groupingFixture();
+  const { pages, result } = suggestions(f, [
+    {edge:edge(800,1200,true,true)},
+    {edge:edge(800,500,true,false)}, {edge:edge(800,500,false,true)},
+    {edge:edge(800,300,true,false)}, {edge:edge(800,300)}, {edge:edge(800,300,false,true)},
+    {edge:edge(800,1200)},
+  ]);
+  assert.deepEqual(Array.from(result,s=>s.pageNumber),[1,2,2,3,3,3,4]);
+  assert.equal(pages[1].pageNumber,undefined);
+  result.forEach(s=>s.page.pageNumber=s.pageNumber);
+  const groups = f.context.numberedPageGroups(pages);
+  assert.deepEqual(Array.from(groups,g=>Array.from(g,p=>p.url)),[['1','2'],['3','4','5']]);
+});
+
+test('ambiguous borders, complete landscapes, short groups, missing analysis and width changes stay separate', () => {
+  const f = groupingFixture();
+  for (const descriptions of [
+    [{edge:edge(800,500)}, {edge:edge(800,500,false,true)}],
+    [{edge:edge(800,500,true)}, {edge:edge(800,500)}],
+    [{edge:edge(800,500,true,true)}, {edge:edge(800,500,false,true)}],
+    [{edge:edge(800,500,true)}, {edge:edge(800,500,true,true)}],
+    [{edge:edge(800,200,true)}, {edge:edge(800,200,false,true)}],
+    [{edge:edge(800,500,true)}, {}, {edge:edge(800,500,false,true)}],
+    [{edge:edge(800,500,true)}, {edge:edge(600,500,false,true)}],
+  ]) {
+    const {result} = suggestions(f,descriptions);
+    assert.deepEqual(Array.from(result,s=>s.pageNumber),descriptions.map((_,i)=>i+1));
+  }
+});
+
+test('exclusions and portraits interrupt detection; a later valid start is still detected', () => {
+  const f = groupingFixture();
+  const {result} = suggestions(f,[
+    {edge:edge(800,500,true)}, {edge:edge(800,100),selected:false}, {edge:edge(800,500,false,true)},
+    {edge:edge(800,500,true)}, {edge:edge(800,1200)}, {edge:edge(800,500,false,true)},
+    {edge:edge(800,500,true)}, {edge:edge(790,500,false,true)},
+  ]);
+  assert.deepEqual(Array.from(result,s=>s.pageNumber),[1,undefined,2,3,4,5,6,6]);
+});
+
+test('numbered groups reject invalid numbers and separated duplicates without changing reading order', () => {
+  const f = groupingFixture();
+  const pages = ['a','b','c'].map((url,index)=>({...f.page(url),pageNumber:index+1}));
+  for (const number of [NaN,0,-1,1.5,Infinity,undefined]) {
+    pages[0].pageNumber=number;
+    assert.throws(()=>f.context.numberedPageGroups(pages),/positive whole/);
+  }
+  pages[0].pageNumber=1; pages[2].pageNumber=1;
+  assert.throws(()=>f.context.numberedPageGroups(pages),/consecutive/);
+  pages[1].selected=false;
+  assert.throws(()=>f.context.numberedPageGroups(pages),/consecutive/);
+  pages[1].selected=true; pages[1].pageNumber=1;
+  const groups=f.context.numberedPageGroups(pages);
+  assert.deepEqual(Array.from(groups[0],p=>p.url),['a','b','c']);
+});
+
+test('edge analysis samples only the first/last native rows, caches bytes and closes resources', async () => {
+  const f = groupingFixture();
+  const calls=[];
+  const white=new Uint8ClampedArray(800*3*4).fill(255);
+  const black=new Uint8ClampedArray(800*3*4);
+  for(let i=3;i<black.length;i+=4) black[i]=255;
+  const canvas={
+    getContext() { return {
+      fillRect(){}, drawImage(...args){calls.push(args.slice(1));},
+      getImageData(x,y){return {data:y===0?white:black};},
+    }; },
+  };
+  f.context.document.createElement=()=>canvas;
+  const page=f.page('a');
+  const observed=await f.context.inspectPageEdges(page);
+  assert.equal(observed.topWhite,true); assert.equal(observed.bottomWhite,false);
+  assert.deepEqual(calls,[[0,0,800,3,0,0,800,3],[0,197,800,3,0,3,800,3]]);
+  assert.equal(canvas.width,0); assert.equal(canvas.height,0);
+  assert.equal(f.closed.length,1); assert.equal(page.bytes,f.jpg);
+  const failed=groupingFixture({noContext:true});
+  await assert.rejects(failed.context.inspectPageEdges(failed.page('a')),/allocate/);
+  assert.equal(failed.closed.length,1);
+});
+
+test('suggested groups merge to expected CBZ pages, retain single-page bytes and undo numbering', async () => {
+  const f=groupingFixture({sizes:[[800,500],[800,500],[800,300],[800,300],[800,300]]});
+  const {pages,result}=suggestions(f,[
+    {edge:edge(800,500,true)}, {edge:edge(800,500,false,true)},
+    {edge:edge(800,1200)},
+    {edge:edge(800,300,true)}, {edge:edge(800,300)}, {edge:edge(800,300,false,true)},
+  ]);
+  result.forEach(s=>s.page.pageNumber=s.pageNumber);
+  const groups=f.context.numberedPageGroups(pages);
+  let current=pages;
+  const merged=[];
+  for(const sources of groups) {
+    const page=await f.context.mergeImagesVertically(sources);
+    merged.push(page); current=f.context.replaceMergedPages(current,sources,page);
+  }
+  assert.deepEqual(Array.from(current,p=>p.pageNumber),[1,2,3]);
+  assert.equal(current[1],pages[2]);
+  await f.context.exportArchive(current,'numbered',()=>{});
+  const zip=await JSZip.loadAsync(await f.saved[0].arrayBuffer());
+  assert.deepEqual(Object.keys(zip.files),['0001.jpg','0002.jpg','0003.jpg']);
+  assert.deepEqual(await zip.file('0002.jpg').async('uint8array'),pages[2].bytes);
+  for(const page of merged) current=f.context.undoMergedPage(current,page);
+  current.forEach((page,i)=>assert.equal(page,pages[i]));
+  assert.deepEqual(Array.from(current,p=>p.pageNumber),[1,1,2,3,3,3]);
+});
+
+async function reviewFixture(options = {}) {
+  const f=groupingFixture(options);
+  class Element {
+    constructor(tag='div') { this.tagName=tag; this.children=[]; this.disabled=false; this.textContent=''; this.className=''; }
+    append(...children) { this.children.push(...children); }
+    replaceChildren(...children) { this.children=children; }
+    setAttribute() {}
+    get classList() { return { toggle: (name,enabled)=> {
+      const classes=new Set(this.className.split(' ').filter(Boolean));
+      if(enabled) classes.add(name); else classes.delete(name);
+      this.className=[...classes].join(' ');
+    } }; }
+  }
+  const ids=new Map();
+  for(const id of ['status','list','title','export','merge','undo','merge-numbered','detect','selection','numbering','start','stop','refresh','close-preview']) {
+    ids.set(id,new Element(id==='title'?'input':id==='status'||id==='list'||id==='selection'||id==='numbering'?'div':'button'));
+  }
+  function controls() {
+    const found=new Set();
+    function visit(element) {
+      if(typeof element!=='object'||found.has(element)) return;
+      found.add(element); element.children.forEach(visit);
+    }
+    ids.forEach(visit);
+    return [...found].filter(element=>['button','input'].includes(element.tagName));
+  }
+  const source=['a','b','c','d'].map(url=>f.page(url));
+  const revoked=[], permissions=[];
+  let objectId=0;
+  Object.assign(f.context,{
+    URL:class extends URL {
+      static createObjectURL(){return 'blob:review/'+(++objectId);}
+      static revokeObjectURL(url){revoked.push(url);}
+    },
+    URLSearchParams,location:{search:'?tab=1'},window:{addEventListener(){}},setTimeout,
+  });
+  const createCanvas=f.context.document.createElement;
+  f.context.document={
+    getElementById:id=>ids.get(id),
+    createElement:tag=>tag==='canvas'?createCanvas():new Element(tag),
+    querySelectorAll:()=>controls(),
+  };
+  f.context.browser.permissions={request:async request=>{permissions.push(request);return options.permission!==false;}};
+  f.context.browser.tabs={sendMessage:async (_,message)=>{
+    if(message.action==='select') source.find(page=>page.url===message.url).selected=message.selected;
+    return {capturing:false,generation:'fixture',entries:source.map(page=>({...page})),missing:0,title:'Chapter'};
+  }};
+  vm.runInContext(fs.readFileSync('dist/popup.js','utf8'),f.context);
+  await new Promise(setImmediate);
+  const rows=()=>ids.get('list').children;
+  const numbers=()=>rows().map(row=>row.children.find(child=>child.className==='page-number').children[1]);
+  const setNumbers=values=>values.forEach((value,index)=>{
+    const input=numbers()[index]; input.valueAsNumber=value; input.oninput();
+  });
+  const idle=async()=>{
+    for(let i=0;i<200;i++) {
+      await new Promise(resolve=>setTimeout(resolve,2));
+      if(!ids.get('detect').disabled)return;
+    }
+    throw new Error('Review operation did not finish');
+  };
+  return {...f,ids,rows,numbers,setNumbers,idle,revoked,permissions};
+}
+
+test('review column merges all numbered groups and supports independent undo after selection changes', async () => {
+  const f=await reviewFixture({sizes:[[800,500],[800,500],[800,500],[800,500]]});
+  assert.deepEqual(f.numbers().map(input=>input.value),['1','2','3','4']);
+  f.setNumbers([1,1,2,2]);
+  assert.equal(f.ids.get('merge-numbered').disabled,false);
+  f.ids.get('merge-numbered').onclick(); await f.idle();
+  assert.equal(f.rows().length,2);
+  assert.deepEqual(f.numbers().map(input=>input.value),['1','2']);
+  assert.equal(f.ids.get('merge-numbered').disabled,true);
+  const selection=f.rows()[0].children.find(child=>child.children?.[1]==='Merge').children[0];
+  selection.checked=true; selection.onchange();
+  const restore=f.rows()[0].children.find(child=>child.textContent==='Undo merge');
+  restore.onclick();
+  assert.equal(f.rows().length,3);
+  f.ids.get('undo').onclick();
+  assert.equal(f.rows().length,4);
+  assert.deepEqual(f.numbers().map(input=>input.value),['1','1','2','2']);
+  assert.equal(f.revoked.length,2);
+});
+
+test('failed numbered batch leaves every row intact and revokes provisional output', async () => {
+  const f=await reviewFixture({sizes:[[800,500],[800,500]]});
+  const decode=f.context.createImageBitmap;
+  let count=0;
+  f.context.createImageBitmap=async blob=>{if(++count>2)throw new Error('bad image');return decode(blob);};
+  f.setNumbers([1,1,2,2]);
+  f.ids.get('merge-numbered').onclick(); await f.idle();
+  assert.equal(f.rows().length,4);
+  assert.deepEqual(f.numbers().map(input=>input.value),['1','1','2','2']);
+  assert.match(f.ids.get('status').textContent,/bad image/);
+  assert.equal(f.revoked.length,1);
+  assert.equal(f.ids.get('undo').disabled,true);
+});
+
+test('review refuses export while numbered groups remain unapplied or numbers are invalid', async () => {
+  const f=await reviewFixture();
+  f.setNumbers([1,1,2,3]);
+  f.ids.get('export').onclick();
+  assert.match(f.ids.get('status').textContent,/Merge numbered pages/);
+  assert.equal(f.permissions.length,0);
+  f.setNumbers([NaN,1,2,3]);
+  f.ids.get('export').onclick();
+  assert.match(f.ids.get('status').textContent,/positive whole/);
+  assert.equal(f.permissions.length,0);
+});
+
+test('review suggestions fill the column without merging, and permission denial preserves edits', async () => {
+  const f=await reviewFixture();
+  const edges=[edge(800,500,true),edge(800,500,false,true),edge(800,1200),edge(800,500)];
+  let next=0;
+  f.context.inspectPageEdges=async()=>edges[next++];
+  f.ids.get('detect').onclick(); await f.idle();
+  assert.equal(f.rows().length,4);
+  assert.deepEqual(f.numbers().map(input=>input.value),['1','1','2','3']);
+  assert.match(f.ids.get('status').textContent,/Page numbers suggested/);
+  const denied=await reviewFixture({permission:false});
+  denied.setNumbers([1,1,2,2]);
+  denied.ids.get('detect').onclick(); await denied.idle();
+  assert.deepEqual(denied.numbers().map(input=>input.value),['1','1','2','2']);
+  assert.match(denied.ids.get('status').textContent,/not granted/);
 });
