@@ -4,6 +4,8 @@
   pageNumber?: number; groupingNote?: string;
   mergeLayout?: ReviewPage[];
   keepSeparate?: boolean;
+  previewUrl?: string; captureError?: string; reencoded?: boolean;
+  saveState?: 'pending' | 'saved' | 'error'; saveError?: string;
 };
 
 function originalPages(page: ReviewPage): ReviewPage[] {

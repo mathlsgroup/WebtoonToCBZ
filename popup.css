@@ -4,3 +4,19 @@ body{font:13px system-ui,sans-serif;width:380px;max-height:550px;margin:12px;col
 .review-actions{position:sticky;top:0;z-index:2;background:#fff;padding:10px 0;border-bottom:1px solid #bbb;box-shadow:0 3px 5px #0001}.review-actions .buttons{flex-wrap:wrap;margin-bottom:6px}.review-actions p{margin:5px 0}.page-number{width:76px;flex-shrink:0;font-size:11px}.page-number input{display:block;width:66px;box-sizing:border-box;padding:6px;margin-top:3px}.entry.numbered-group{border-left:4px solid #487aba}.grouping-note{white-space:normal;display:block}.review .entry{flex-wrap:wrap}.review{width:min(1050px,95vw)}
 .entry[hidden]{display:none}
 .height-controls{display:flex;align-items:end;gap:8px;flex-wrap:wrap;margin:8px 0}.height-controls input{width:90px;padding:6px;margin-left:6px}
+
+/* Keep the review action inside Firefox's popup height limit. Only the image
+   list absorbs remaining space; a long capture must never push the action out. */
+html.popup-root{width:420px;height:600px;overflow:hidden}
+body.popup{box-sizing:border-box;width:420px;height:100%;max-height:none;margin:0;padding:12px;display:flex;flex-direction:column;gap:8px;overflow:hidden}
+.popup>*{flex-shrink:0}
+.popup h1,.popup p,.popup .buttons{margin:0}
+.popup #status{min-height:0;max-height:5.4em;overflow:auto;overflow-wrap:anywhere}
+.popup #title{margin:5px 0 0}
+.popup #list{flex:1 1 0;min-height:0;max-height:none;margin:0;overflow:auto}
+.popup .popup-help{font-size:11px;line-height:1.35}
+.popup #export{flex-shrink:0;min-height:36px}
+.popup .buttons{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+.popup .buttons #start{grid-column:1/-1}
+.popup .entry img{width:70px;height:90px;flex-shrink:0}
+.popup .entry span{min-width:0;overflow-wrap:anywhere}

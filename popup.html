@@ -1,10 +1,12 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><link rel="stylesheet" href="popup.css"></head><body>
+<!doctype html><html lang="en" class="popup-root"><head><meta charset="utf-8"><link rel="stylesheet" href="popup.css"></head><body class="popup">
 <h1>Webtoon to CBZ <small>v0.1</small></h1>
 <p id="status">Loading…</p>
-<div class="buttons"><button id="start">Start</button><button id="stop">Stop</button><button id="refresh">Refresh</button></div>
+<label><input id="auto-pixels" type="checkbox" checked> Automatic PNG fallback: save displayed pixels if original bytes are not ready (re-encodes the image).</label>
+<label><input id="auto-continue" type="checkbox" checked> Automatic continuation: include following chapters in this tab (site access required).</label>
+<div class="buttons"><button id="start">Start new capture</button><button id="stop">Stop</button><button id="refresh">Refresh</button></div>
 <label>CBZ filename <input id="title" type="text" placeholder="Series - 0280"></label>
 <div id="list"></div>
-<p>Single-document capture. Reloading or navigating resets capture. Check every page and its order before exporting. Save only images you are authorized to archive.</p>
+<p class="popup-help">Detected images are saved locally. After navigation, reopen the extension to review the saved capture. Start new capture replaces it. Wait for local saving before leaving. Save only images you are authorized to archive.</p>
 <button id="export" disabled>Open review and export tab</button>
-<script src="imageMerger.js"></script><script src="popup.js"></script>
+<script src="imageMerger.js"></script><script src="export.js"></script><script src="capturedBlobs.js"></script><script src="popup.js"></script>
 </body></html>

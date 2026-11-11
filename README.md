@@ -2,7 +2,8 @@
 
 Firefox-first extension for archiving images you are authorized to save. Captures
 image URLs while you read, offers review and ordering, and exports an ordinary ZIP
-with a .cbz extension. Unmerged images retain their original bytes. No telemetry,
+with a .cbz extension. Available original bytes are preserved; PNG pixel fallbacks
+and user-requested merges are explicitly labelled as re-encoded. No telemetry,
 accounts, or external services.
 
 ## Requirements and commands
@@ -31,18 +32,70 @@ and select `dist/manifest.json`. Reload the add-on after rebuilding.
 ## Workflow
 
 1. Open an authorized HTTP(S) chapter and complete any human verification yourself.
-2. Click the extension icon, then **Start**. Starting again clears that capture.
-3. Read/scroll through the chapter. Capture continues after the popup closes.
+2. Choose whether to allow **Automatic PNG fallback** and **Automatic continuation**,
+   then click **Start new capture**. Automatic continuation requests access to this
+   site's origin when needed, so capture can resume after a full document change.
+   This replaces the previous capture for that tab. The checked fallback option
+   permits re-encoding displayed pixels if original blob bytes are not ready when
+   the PNG safety copy finishes. Fast original reads still win without conversion.
+3. Read/scroll/use the reader arrows normally. Capture continues after the popup
+   closes and resumes after page changes in this tab. Following chapters on the
+   same authorized origin are appended to the same capture and exported together.
 4. Click **Stop**, then **Open review and export tab**.
 5. Check that every chapter page is present. Exclude ads, move pages with
    **Up/Down**, and enter a filename such as `Series - 0280`.
 6. Export. Firefox asks for access to the image server origins when needed.
    Keep the review tab open until saving completes. The popup may close freely.
 
-Exclusions, title, and manual ordering are retained in the source document until
-a new capture starts or that document is closed/reloaded/navigated. Refresh does
-not reset these choices. Source navigation invalidates an open review; it must
-not silently export stale data.
+The list, exclusions, title, manual ordering and recovered blob bytes are saved in
+extension-origin IndexedDB, never in site storage or storage.sync. They remain
+reviewable/exportable after source navigation or reload. Wait until local image
+saving completes before leaving; data not recovered and saved beforehand cannot
+be recreated after navigation. Storage failures are shown in the popup/review.
+**PNG re-encoded** describes image format, not a completed save. Wait for the
+separate **Saved locally** confirmation (and zero not-yet-saved images) before
+leaving a document. Each image is acknowledged only after IndexedDB verifies all
+its chunks and commits a completion marker. A stale metadata checkpoint cannot
+undo that acknowledgement. Failed writes remain errors and never count as saved.
+**Stop** waits for current image/save tasks and returns their confirmed status.
+Firefox is asked to warn before full navigation/reload while work is pending;
+this does not intercept the reader's arrows when they only replace a DOM image.
+
+To repair an older incomplete Scan-Manga capture, return to its image with the
+reader arrows and enable Automatic continuation if capture is stopped. A loaded page
+whose advertised slot is already known is rebound to its new image node/blob and
+retried if its archived bytes are missing. The original row/order/exclusion are
+retained rather than adding duplicates. Refresh the review after **Saved locally**.
+Starting a new capture instead discards the old list and is not needed for repair.
+
+**Automatic continuation** replaces the manual Continue button. After a complete
+page load, the background coordinator injects capture only into that tab, checks
+that the permission/session are still valid, and restores the same capture
+generation. The PNG fallback choice and review metadata are preserved. Reader
+arrows that replace DOM images continue under the existing observer without
+restarting capture. Reloading is supported, too. The extension never clicks arrows,
+scrolls automatically, loads a URL, or navigates the user to another page.
+
+Following chapters are included in the same CBZ, as requested. On Scan-Manga,
+page slots are keyed by chapter identity plus page number: chapter 2 page 1 cannot
+replace chapter 1 page 1. Chapter order and advertised missing-page counts survive
+navigation, and leftover old reader nodes are ignored during a chapter transition.
+Other origins and tabs are excluded. Automatic recovery on a live site still
+requires Firefox validation; fixtures cover the event/storage flows.
+
+Known challenge pages and missing Scan-Manga reader containers pause capture.
+The content script observes readiness and rechecks authorization before resuming
+after the user completes verification. It does not solve or interact with a
+challenge. **Stop** disables automatic continuation durably, including when the
+source document is gone. To resume an existing capture, check Automatic continuation
+again; no new Start is required. Denying/revoking site access leaves full-navigation
+recovery off/paused, while already saved images remain available.
+
+Use **Start new capture** for a separate chapter; it removes the previous tab's
+saved payloads. Incomplete previous documents remain reported as missing.
+The saved capture belongs to its source tab identifier for the current Firefox
+session; a full Firefox restart clears it to prevent tab-identifier collisions.
+Review-only edits such as merges and numbering still live in the review tab.
 
 ## Manual vertical merging
 
@@ -189,6 +242,103 @@ reserve positions before downloads complete. Connected image elements follow DOM
 order; URL duplicates are collapsed. Captured URLs remain available if elements
 are removed or their source changes.
 
+Same-origin `blob:` image URLs are also captured. Their bytes are read in the
+source content script as soon as the loaded image is encountered during reading,
+so later URL revocation does not require refetching the image. The review tab
+retrieves the cached data in 256 KiB messages, validates the signature and creates
+its own temporary object URL for preview. Unmerged bytes are exported unchanged.
+The 420-pixel-wide popup displays local previews directly (70 by 90 pixels). On
+the first read it creates a derived PNG thumbnail, bounded to 140 by 180 pixels
+for high-density displays, and saves it in extension IndexedDB. Reopening fetches
+all available thumbnails in one request: it does not transfer/decode the original
+image again or recalculate a thumbnail. Missing thumbnails are generated once,
+and previews appear progressively instead of waiting for the entire chapter.
+This cache never modifies captured originals or CBZ entries. Thumbnail-only popup
+entries are not treated as full image bytes; review/export reads the original
+payloads separately. Cache failures fall back to the uncached preview path.
+No source blob URL is opened from the extension origin. Successful previews are
+reused across Refresh and temporary object URLs are released on closing.
+Per-image read/decode failures appear beside the thumbnail instead of a misleading
+instruction to open the review tab. The review/export button stays below the
+scrolling image list; use the review tab for larger previews and editing.
+
+Start new capture deletes the previous capture's thumbnail cache. A confirmed
+successful export clears only derived thumbnails, retaining original bytes and
+review edits for undo/re-export. Cancelled/failed exports leave the cache intact.
+A cache version prevents an older popup from repopulating it after an export
+clears it. The first popup opening after clearing regenerates previews as needed.
+Thumbnail payloads are limited to 256 KiB each and validated as PNG. They share
+the capture's generation/tab scope and local-only lifecycle, without new permissions.
+Recovered blob bytes are also saved in bounded IndexedDB chunks. The source tab
+is needed while reading/capturing pixels, but saved bytes remain available after
+its document changes or closes. Keep the review tab open until export completes;
+review object URLs are released when no longer used.
+Source transport reads byte indices directly rather than using typed-array
+subarray/slice operations: Firefox compartment wrappers can deny access to their
+constructor/species, particularly for Canvas-produced data. No image re-encoding
+is performed during this transfer.
+
+If Firefox cannot read the blob from the isolated content-script context, the
+background script performs a fallback read in the source page's MAIN execution
+world. It accepts requests only from this extension's top-frame capture script,
+checks the blob origin and requires a matching, loaded image in that document.
+It invokes no site functions, reads no page variables, and does not intercept URL
+creation or revocation. The page can influence MAIN-world results, so responses
+are bounded (64 MiB per image), checked during transport, and signature-validated
+before preview/export. This fallback preserves the original returned image bytes;
+it does not reconstruct pixels through canvas. Failed reads are retried when the
+review requests data again, including when the reader replaced the image URL.
+Successful bytes remain cached. A URL revoked before either read succeeds remains
+unavailable; the error now includes the underlying cause instead of hiding it.
+
+Loaded-image events are scanned immediately during the capture phase, rather than
+waiting for the next animation frame, so a target load handler has less opportunity
+to revoke the URL before the byte request begins. This cannot restore an URL that
+was already revoked before Start.
+
+For an unreadable blob that remains loaded in the source document, the review row
+offers **Use displayed pixels (PNG)**. This is an explicit, per-image action.
+If **Automatic PNG fallback** was enabled at Start or when enabling continuation, a provisional PNG
+copy is drawn immediately when a loaded blob image is detected, before waiting
+for any asynchronous original-byte read. Thus a reader arrow can replace/remove
+the image without changing the frozen pixels. This copy is selected and archived
+as soon as it is ready if the original-byte read is still pending or has failed.
+An already-ready original is preferred, with one event-loop turn of grace for a
+fast original response. A blocked original therefore cannot postpone saving a
+finished PNG until its 30-second timeout. The chosen result is immutable: a late
+original does not replace a PNG while chunks are transferred or after commit.
+Fast successful originals discard the provisional copy and remain unchanged.
+This extra Canvas work may increase CPU/memory use.
+Uncheck the option before Start/enabling continuation to require manual conversion. Available
+original bytes take precedence when ready first. It draws the loaded, same-origin image at its native
+dimensions onto Canvas and encodes PNG, without cropping/resizing. The preview and
+CBZ then use those PNG bytes, and the row permanently labels the re-encoding.
+Original compressed bytes, metadata and animation are not preserved by this mode;
+the browser's current decoded image/frame is used. Original cached files are never
+replaced by this action. Canvas origin-clean checks and memory limits remain in
+force, and failures leave the original error intact. Keep the source image loaded;
+manual fallback cannot capture an image already removed. An automatic safety copy
+made before removal can still finish while the same document remains alive.
+Full navigation before the chosen bytes finish saving can still interrupt capture.
+When automatic continuation restores old entries, their binary chunks are read from the extension
+archive rather than assuming they are present in the new document's memory cache.
+
+A narrowly scoped Scan-Manga adapter recognizes `#container.img_lel[data-nbpage]`
+on scan-manga.com and www.scan-manga.com. It captures only images in that reader,
+orders them by their enclosing `data-page`, and avoids duplicate entries if the
+reader replaces a captured page with a fresh blob URL. The advertised page count
+also detects unloaded/unread slots: two captured pages out of twelve report ten
+missing, and export is blocked until all pages have been encountered. Start capture
+before reading and scroll normally through every page. No placeholder is downloaded
+or advanced automatically. Toolbar Refresh imports newly captured pages and bytes.
+
+These behaviors are covered by regression fixtures reproducing the supplied
+Scan-Manga DOM; live integration on that site still requires Firefox validation.
+If a blob was revoked before its bytes could be read, or its media type is not
+supported, the review reports the error and refuses to export that included image.
+Reload the chapter and start capture before reading if necessary. No site-provided
+functions are invoked and no encryption, challenges or access controls are bypassed.
+
 There is no minimum width/height filter: short or narrow strips remain reviewable.
 This also means icons and ads can appear and must be excluded manually. Broken or
 pending images encountered during reading are counted and block export. Load them
@@ -197,34 +347,43 @@ inserted or the user never reached; manually verify completeness.
 
 ## Export and data flow
 
-The review tab fetches selected URLs sequentially, with a 30-second response
+For HTTP(S) URLs, the review tab fetches selected URLs sequentially, with a 30-second response
 timeout per image, and checks JPEG, PNG, GIF, WebP, or AVIF signatures. It preserves
 the returned bytes and names entries `0001.jpg`, `0002.png`, etc. HTTP failures,
 unsupported data (including HTML challenges), permission refusal, and interrupted
 downloads are reported. No partial CBZ is exported after an image fetch failure.
-Success is reported only when Firefox reports a completed download.
+Success is reported only when Firefox reports a completed download. Cached blob
+images use the same signature validation and naming without HTTP host requests.
 
 Requests use the normal browser session where Firefox permits it. No cookies,
 tokens, or credentials are read or extracted. Fetching images and previews contacts
 their original servers; the extension does not transmit them to another service.
-All capture state is held in memory, not storage.sync or an external database.
-The complete archive is assembled in memory, which limits very large chapters.
+Capture metadata and recovered blob data use local extension IndexedDB. HTTP(S)
+entries currently retain URLs and are refetched during export; unavailable remote
+URLs still fail explicitly. No data is uploaded or synced. Review merges and the
+complete CBZ are assembled in memory, which limits very large chapters.
 
 ## Permissions
 
 - `activeTab`: access to the tab explicitly selected through the extension action.
 - `scripting`: inject the capture script into that tab.
 - `downloads`: save the CBZ and observe completion/interruption.
-- Optional HTTP(S) host permissions: requested only for selected image origins
-  when exporting, rather than granting access to every site at installation.
+- Optional HTTP(S) host permissions: automatic continuation requests the current
+  reader's origin at Start/enabling the checkbox. Export/merge may request the
+  selected image server origins separately. No global host access is required.
   Granted permissions remain in Firefox until revoked in the add-on settings.
 
 ## Known limits
 
-- Single-document capture only. Reloads and full page navigation reset it.
-  Paginated readers that replace the document are not yet supported.
-- Detection covers ordinary top-level `img` elements, not iframe contents,
-  CSS backgrounds, canvas, blob URLs, or encrypted media.
+- Full-navigation recovery requires Automatic continuation and granted site access.
+  It runs after document loading, so leaving again before capture/save finishes can
+  still lose unrecorded data. Cross-page operation has regression coverage but
+  still needs real Firefox testing. The same-origin limit excludes cross-domain redirects.
+- Detection covers top-level `img` elements with HTTP(S) or readable same-origin
+  blob URLs, not iframe contents, CSS backgrounds, canvas or encrypted media.
+- Original bytes of blobs already revoked before capture cannot be recovered;
+  the optional displayed-pixels PNG action may still work for loaded images. Supported image
+  signatures are JPEG, PNG, GIF, WebP and AVIF; other blob formats fail explicitly.
 - DOM order may differ from reading order on recycled/paginated readers.
   Review and manual ordering are required; no site compatibility is claimed.
 - Deduplication uses exact URLs, not image content. Different URLs with identical
@@ -232,12 +391,20 @@ The complete archive is assembled in memory, which limits very large chapters.
 - Refetching can fail due to access restrictions, expired URLs, or browser cookie
   rules. The bytes returned on export can differ from an earlier server response.
 - Preview images may be unavailable even when an export request would succeed.
-- Closing the review tab stops its export. Closing Firefox loses capture state.
+- Closing the review tab stops its export. A full Firefox restart clears saved captures.
 - No scrolling/navigation automation or access-control bypass.
 
 ## Implementation and validation
 
 - `src/content.ts`: scoped, idempotent injection, viewport observation and review state.
+- `src/background.ts`: validates source requests and performs the displayed-blob
+  fallback in the source page context when isolated reads fail.
+- `src/capturedBlobs.ts`: bounded transport of cached source image bytes to review.
+- `src/captureStore.ts`: transactional local checkpoints and archived image chunks,
+  with generation checks and review access after source navigation.
+- `src/navigation.ts`: per-tab automatic continuation, persisted enable/stop policy,
+  permission checks and background navigation listeners.
+- `src/navigationScope.ts`: shared origin/chapter identity checks and pagination normalization.
 - `src/popup.ts`: popup/review controls and source-document validation.
 - `src/export.ts`: signature checks, filename sanitation and CBZ saving.
 - `src/imageMerger.ts`: Canvas merging and reversible source retention.

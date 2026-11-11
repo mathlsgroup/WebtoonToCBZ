@@ -31,6 +31,7 @@ function archiveFilename(input: string): string {
 }
 
 async function fetchImageBytes(url: string): Promise<Uint8Array> {
+  if (url.startsWith('blob:')) throw new Error('Captured blob bytes unavailable. Refresh the review or recapture the visible page.');
   const response = await fetch(url, { credentials: 'include', signal: AbortSignal.timeout(30000) });
   if (!response.ok) throw new Error('HTTP ' + response.status + '. No archive exported.');
   const bytes = new Uint8Array(await response.arrayBuffer());

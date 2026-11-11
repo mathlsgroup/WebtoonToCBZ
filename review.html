@@ -3,7 +3,7 @@
 <body class="review">
 <h1>Review chapter images</h1>
 <p id="status" role="status">Loading...</p>
-<p>Keep this tab open until export completes. Check order, remove ads, and verify that every chapter page is present. Navigation or reload of the source tab resets capture. Use only for images you are authorized to save.</p>
+<p>Keep this tab open until export completes. Check order, remove ads, and verify completeness. Saved captures remain reviewable after source navigation; images not saved before leaving may be unavailable. Use only for images you are authorized to save.</p>
 <div class="buttons"><button id="start">Start</button><button id="stop">Stop</button><button id="refresh">Refresh</button></div>
 <label>CBZ filename <input id="title" type="text" placeholder="Series - 0280"></label>
 <div class="review-actions">
@@ -20,5 +20,5 @@
 <div id="list"></div>
 <dialog id="large-preview"><button id="close-preview">Close preview</button><img alt="Full page preview"></dialog>
 <button id="export" disabled>Export selected images to CBZ</button>
-<script src="jszip.min.js"></script><script src="export.js"></script><script src="imageMerger.js"></script><script src="pageGrouping.js"></script><script src="autoGrouping.js"></script><script src="popup.js"></script>
+<script src="jszip.min.js"></script><script src="export.js"></script><script src="capturedBlobs.js"></script><script src="imageMerger.js"></script><script src="pageGrouping.js"></script><script src="autoGrouping.js"></script><script src="popup.js"></script>
 </body></html>

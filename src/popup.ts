@@ -1,16 +1,21 @@
 (() => {
   type Entry = ReviewPage;
-  type State = { capturing: boolean; generation: string; title: string; entries: Entry[]; missing: number };
+  type State = { capturing: boolean; generation: string; title: string; entries: Entry[]; missing: number; archived?: boolean; archiveError?: string; captureNotice?: string; pendingSaves?: number; savedCount?: number; unsavedCount?: number };
   const statusElement = document.getElementById('status')!;
   const list = document.getElementById('list')!;
   const titleInput = document.getElementById('title') as HTMLInputElement;
   const exportButton = document.getElementById('export') as HTMLButtonElement;
   const review = new URLSearchParams(location.search).has('tab');
   let tabId: number;
+  let sourceUrl = '';
+  const automaticOption = document.getElementById('auto-continue') as HTMLInputElement | null;
   let entries: Entry[] = [];
   let generation = '';
   let busy = false;
   let missing = 0;
+  let archivedMode = false;
+  let previewCacheVersion: number | undefined;
+  let previewCacheWarning = '';
   const mergeSelected = new Set<string>();
   const mergeButton = document.getElementById('merge') as HTMLButtonElement | null;
   const undoButton = document.getElementById('undo') as HTMLButtonElement | null;
@@ -82,11 +87,89 @@
 
   function setStatus(value: string): void { statusElement.textContent = value; }
   async function send(action: string, extra: object = {}): Promise<State> {
-    try { return await browser.tabs.sendMessage(tabId, { action, ...extra }); }
-    catch { throw new Error('Capture unavailable: the source tab was closed or navigated. Start again from the chapter.'); }
+    if (action === 'start') archivedMode = false;
+    let live: State | undefined;
+    if (!archivedMode || action === 'start') {
+      try { live = await browser.tabs.sendMessage(tabId, { action, ...extra }); }
+      catch { /* Navigation can destroy the source script; use the saved capture. */ }
+      if (live && (live.entries.length || live.capturing || action === 'start')) return live;
+    }
+    try {
+      const stored = await browser.runtime?.sendMessage?.({ action: 'archive-request', command: action, tabId, ...extra });
+      if (stored && !stored.error) { archivedMode = true; return stored; }
+    } catch { /* Report the original source failure if no saved capture exists. */ }
+    if (live) return live;
+    throw new Error('Capture unavailable: the source tab was closed or navigated and no saved capture is available.');
   }
   async function safe(action: () => Promise<void>): Promise<void> {
     try { await action(); } catch (error) { setStatus(String(error)); }
+  }
+  function unavailableBlob(pages: Entry[]): string | undefined {
+    const missing = pages.filter(page => page.url.startsWith('blob:') && !page.bytes && (review || !page.previewUrl));
+    return missing.find(page => page.captureError)?.captureError
+      ?? (missing.length ? 'Captured blob bytes unavailable. Refresh the review.' : undefined);
+  }
+  async function loadBlobPreviews(): Promise<State | undefined> {
+    const pages = entries.flatMap(originalPages).filter(page => page.url.startsWith('blob:') && !page.bytes && (review || !page.previewUrl));
+    if (!pages.length) return;
+    const previousBusy = busy;
+    busy = true; render();
+    try {
+      if (!review && browser.runtime?.sendMessage) {
+        try {
+          const cached = await browser.runtime.sendMessage({ action: 'archive-preview-get', tabId, generation, urls: pages.map(page => page.url) });
+          if (cached?.error) throw new Error(cached.error);
+          if (cached?.generation !== generation || !Number.isSafeInteger(cached.previewVersion) || !Array.isArray(cached.previews)) {
+            throw new Error('Invalid thumbnail cache response.');
+          }
+          previewCacheVersion = cached.previewVersion;
+          previewCacheWarning = '';
+          for (const thumbnail of cached.previews as { url: string; dataUrl: string }[]) {
+            const page = pages.find(page => page.url === thumbnail.url);
+            if (page && typeof thumbnail.dataUrl === 'string' && thumbnail.dataUrl.startsWith('data:image/png;base64,')
+              && thumbnail.dataUrl.length <= 256 * 1024) { page.previewUrl = thumbnail.dataUrl; page.captureError = undefined; }
+          }
+          render();
+        } catch (error) { previewCacheVersion = undefined; previewCacheWarning = String(error); }
+      }
+      const uncached = pages.filter(page => review || !page.previewUrl);
+      for (const [index, page] of uncached.entries()) {
+        setStatus('Reading captured local image ' + (index + 1) + '/' + uncached.length + '...');
+        try {
+          const bytes = await readCapturedBlob(tabId, generation, page.url);
+          const extension = imageExtension(bytes);
+          const preview = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: extension === 'jpg' ? 'image/jpeg' : 'image/' + extension }));
+          page.bytes = bytes; page.previewUrl = preview; page.captureError = undefined;
+          objectUrls.add(preview);
+          render(); // Show each successful preview without waiting for the chapter.
+          if (!review && previewCacheVersion !== undefined) {
+            try {
+              const thumbnail = await createCapturedThumbnail(bytes);
+              const stored = await browser.runtime.sendMessage({ action: 'archive-preview-put', tabId, generation,
+                url: page.url, dataUrl: thumbnail, previewVersion: previewCacheVersion });
+              if (!stored?.ok) throw new Error(stored?.error || 'Thumbnail save was not confirmed.');
+              page.previewUrl = thumbnail;
+              page.bytes = undefined; // Popup needs only the thumbnail; originals stay archived.
+              URL.revokeObjectURL(preview); objectUrls.delete(preview);
+            } catch (error) { previewCacheWarning = String(error); }
+          }
+        } catch (error) { page.captureError = String(error); }
+        render();
+      }
+      // Automatic PNG fallback may finish after the initial snapshot was sent.
+      // Refresh metadata so successful pixel captures are never labelled original.
+      const current = await send('status');
+      if (current.generation !== generation) throw new Error('Capture changed. Refresh the review.');
+      for (const page of pages) {
+        const entry = current.entries.find(entry => entry.url === page.url);
+        if (entry?.reencoded) page.reencoded = true;
+        if (entry?.saveState) { page.saveState = entry.saveState; page.saveError = entry.saveError; }
+      }
+      return current;
+    } finally {
+      busy = previousBusy;
+      if (!busy) for (const control of document.querySelectorAll<HTMLButtonElement | HTMLInputElement>('button,input')) control.disabled = false;
+    }
   }
   async function verifyCapture(): Promise<void> {
     const state = await send('status');
@@ -121,9 +204,11 @@
   }
   function runReviewTask(pages: Entry[], message: string, task: (verify: () => Promise<void>) => Promise<void>): void {
     if (busy) return;
-    const origins = [...new Set(pages.filter(page => !page.bytes).map(page => new URL(page.url).origin + '/*'))];
+    const unavailable = unavailableBlob(pages);
+    if (unavailable) { setStatus(unavailable); return; }
+    const origins = [...new Set(pages.filter(page => !page.bytes && /^https?:/.test(page.url)).map(page => new URL(page.url).origin + '/*'))];
     // Host access must be requested in the click handler, before the first await.
-    const permission = browser.permissions.request({ origins });
+    const permission = origins.length ? browser.permissions.request({ origins }) : Promise.resolve(true);
     busy = true; render(); setStatus(message);
     void safe(async () => {
       const verify = async (): Promise<void> => {
@@ -186,10 +271,26 @@
         void safe(async () => { for (const source of originalPages(item)) { source.selected = item.selected; await send('select', { url: source.url, selected: item.selected }); } });
       };
       const preview = document.createElement('img');
-      preview.src = item.url; preview.alt = 'Page preview'; preview.loading = 'lazy';
+      if (item.previewUrl || !item.url.startsWith('blob:')) preview.src = item.previewUrl ?? item.url;
+      preview.alt = item.captureError ? 'Preview unavailable' : item.url.startsWith('blob:') && !item.previewUrl ? 'Loading capture...' : 'Page preview';
+      preview.loading = 'lazy';
       const caption = document.createElement('span');
       caption.textContent = (index + 1) + ' · ' + item.width + '×' + item.height;
       row.append(check, preview, caption);
+      if (!review) {
+        const note = document.createElement('small'); note.className = 'grouping-note';
+        note.textContent = item.captureError || (item.saveState === 'saved' ? 'Saved locally.'
+          : item.saveError || (item.url.startsWith('blob:') ? 'Saving locally...' : ''));
+        caption.append(document.createElement('br'), note);
+        preview.onerror = () => {
+          note.textContent = item.captureError || 'Image preview could not be loaded. Use Refresh to retry.';
+          if (item.previewUrl?.startsWith('data:')) {
+            item.previewUrl = undefined;
+            void browser.runtime?.sendMessage?.({ action: 'archive-preview-delete', tabId, generation,
+              url: item.url, previewVersion: previewCacheVersion }).catch(() => {});
+          }
+        };
+      }
       if (review) {
         const numberLabel = document.createElement('label'); numberLabel.className = 'page-number';
         const number = document.createElement('input');
@@ -203,7 +304,31 @@
         };
         numberLabel.append('Page number', number); row.append(numberLabel);
         const note = document.createElement('small'); note.className = 'grouping-note';
-        note.textContent = item.groupingNote ?? ''; caption.append(document.createElement('br'), note);
+        note.textContent = [item.captureError, item.reencoded ? 'PNG re-encoded from displayed pixels; original file bytes not retained.' : '',
+          item.saveState === 'saved' ? 'Saved locally.' : item.saveState === 'pending' ? 'Saving locally: wait before leaving the document.' : item.saveError,
+          item.groupingNote].filter(Boolean).join(' '); caption.append(document.createElement('br'), note);
+        if (item.captureError && item.url.startsWith('blob:') && !item.bytes) {
+          const pixels = document.createElement('button');
+          pixels.textContent = 'Use displayed pixels (PNG)'; pixels.disabled = busy;
+          pixels.onclick = () => {
+            if (busy) return;
+            busy = true; render();
+            void safe(async () => {
+              try {
+                await verifyCapture();
+                const result = await browser.tabs.sendMessage(tabId, {
+                  action: 'capture-displayed-pixels', generation, url: item.url,
+                });
+                if (result?.error) throw new Error(result.error);
+                item.reencoded = Boolean(result?.reencoded);
+                await loadBlobPreviews();
+                if (!item.bytes) throw new Error(item.captureError || 'Displayed image remains unavailable.');
+                setStatus(item.reencoded ? 'Captured displayed pixels as PNG. This page is re-encoded; inspect its preview before exporting.' : 'Original image bytes recovered.');
+              } finally { busy = false; render(); }
+            });
+          };
+          caption.append(pixels);
+        }
         const selectLabel = document.createElement('label');
         const select = document.createElement('input'); select.type = 'checkbox';
         select.checked = mergeSelected.has(item.url); select.disabled = busy;
@@ -216,7 +341,7 @@
         const enlarge = document.createElement('button'); enlarge.textContent = 'Preview';
         enlarge.onclick = () => {
           const dialog = document.getElementById('large-preview') as HTMLDialogElement;
-          dialog.querySelector('img')!.src = item.url; dialog.showModal();
+          dialog.querySelector('img')!.src = item.previewUrl ?? item.url; dialog.showModal();
         };
         row.append(enlarge);
         if (!item.selected) {
@@ -249,10 +374,15 @@
     updateSelection();
   }
   async function refresh(action = 'images'): Promise<void> {
-    const state = await send(action);
+    let state = await send(action);
     const byUrl = new Map(state.entries.map(entry => [entry.url, entry]));
-    if (generation === state.generation && review) {
+    if (generation === state.generation) {
       const known = new Set(entries.flatMap(originalPages).map(page => page.url));
+      for (const page of entries.flatMap(originalPages)) {
+        if (byUrl.get(page.url)?.reencoded) page.reencoded = true;
+        const entry = byUrl.get(page.url);
+        if (entry?.saveState) { page.saveState = entry.saveState; page.saveError = entry.saveError; }
+      }
       for (const page of entries) {
         if (!page.sources) page.selected = byUrl.get(page.url)?.selected ?? page.selected;
       }
@@ -268,15 +398,68 @@
     missing = state.missing;
     if (state.title) titleInput.value = state.title;
     else if (titleInput.value) await send('title', { title: titleInput.value });
+    const latest = await loadBlobPreviews();
+    if (latest) { state = latest; missing = latest.missing; }
+    let automatic: { enabled: boolean; pauseReason?: string } | undefined;
+    if (automaticOption && browser.runtime?.sendMessage) {
+      const navigation = await browser.runtime.sendMessage({ action: 'navigation-status', tabId });
+      automatic = navigation?.autoResume;
+      if (automatic) automaticOption.checked = automatic.enabled;
+      else if (state.entries.length) automaticOption.checked = false;
+    }
     render();
-    setStatus((state.capturing ? 'Capturing. ' : 'Stopped. ') + entries.length
+    setStatus((state.archived ? 'Saved capture (source page changed). ' : state.capturing ? 'Capturing. ' : 'Stopped. ') + entries.length
       + ' images. Check order and exclude unwanted images.'
-      + (missing ? ' WARNING: ' + missing + ' viewed image(s) not loaded or broken.' : ''));
+      + (missing ? ' WARNING: ' + missing + ' chapter/viewed image(s) missing, unread or not loaded. Continue reading with capture active.' : '')
+      + (unavailableBlob(entries) ? ' WARNING: some local image bytes are unavailable; see row errors.' : '')
+      + (state.pendingSaves ? ' Saving local image data; wait before navigating.' : '')
+      + (state.savedCount !== undefined ? ' Saved locally: ' + state.savedCount + '. Not yet saved: ' + (state.unsavedCount ?? 0) + '.' : '')
+      + (state.archiveError ? ' WARNING: local backup failed: ' + state.archiveError : ''));
+    if (state.captureNotice) setStatus(statusElement.textContent + ' ' + state.captureNotice);
+    if (automatic?.enabled) setStatus(statusElement.textContent + (automatic.pauseReason
+      ? ' Automatic continuation paused: ' + automatic.pauseReason : ' Automatic continuation on.'));
+    if (previewCacheWarning) setStatus(statusElement.textContent + ' Thumbnail cache unavailable; previews may reload.');
   }
-  document.getElementById('start')!.onclick = () => safe(async () => {
+  function automaticPermission(enabled: boolean): Promise<boolean> {
+    if (!enabled) return Promise.resolve(true);
+    if (!sourceUrl) return Promise.resolve(false);
+    // Must run directly in the Start/checkbox gesture, before awaiting any API.
+    return browser.permissions.request({ origins: [new URL(sourceUrl).origin + '/*'] });
+  }
+  async function controlAutomatic(enabled: boolean, state: State): Promise<void> {
+    const option = document.getElementById('auto-pixels') as HTMLInputElement | null;
+    const result = await browser.runtime.sendMessage({ action: 'navigation-control', tabId, enabled,
+      generation: state.generation, autoPixels: option?.checked ?? false, includeNextChapters: true });
+    if (result?.error) throw new Error(result.error);
+    if (enabled) archivedMode = false;
+  }
+  document.getElementById('start')!.onclick = () => {
     if (busy) return;
-    await refresh('start');
-  });
+    const enabled = automaticOption?.checked ?? false;
+    const permission = automaticPermission(enabled);
+    return safe(async () => {
+      const granted = await permission;
+      archivedMode = false;
+      const option = document.getElementById('auto-pixels') as HTMLInputElement | null;
+      const state = await send('start', { autoPixels: option?.checked ?? false });
+      if (enabled && granted) await controlAutomatic(true, state);
+      if (enabled && !granted && automaticOption) automaticOption.checked = false;
+      await refresh();
+      if (enabled && !granted) setStatus(statusElement.textContent + ' Automatic continuation off: site access was not granted.');
+    });
+  };
+  if (automaticOption) automaticOption.onchange = () => {
+    if (busy) return;
+    const enabled = automaticOption.checked;
+    const permission = automaticPermission(enabled);
+    return safe(async () => {
+      if (!await permission) { automaticOption.checked = false; throw new Error('Site access was not granted. Automatic continuation remains off.'); }
+      const state = await send('status');
+      if (enabled && state.pendingSaves && !state.capturing) throw new Error('Wait for local saving to finish.');
+      await controlAutomatic(enabled, state);
+      await refresh();
+    });
+  };
   document.getElementById('stop')!.onclick = () => safe(async () => { if (!busy) await refresh('stop'); });
   document.getElementById('refresh')!.onclick = () => safe(async () => { if (!busy) await refresh(); });
   titleInput.oninput = () => { void safe(async () => { await send('title', { title: titleInput.value }); }); };
@@ -423,16 +606,18 @@
     }
     const selected = entries.filter(entry => entry.selected);
     if (!selected.length) { setStatus('Select at least one image.'); return; }
+    const unavailable = unavailableBlob(selected);
+    if (unavailable) { setStatus(unavailable); return; }
     try {
       if (numberedPageGroups(entries).length) {
         setStatus('Use Merge numbered pages before exporting, or assign different numbers to keep images separate.'); return;
       }
     } catch (error) { setStatus(String(error)); return; }
     // Request only image origins, directly inside the user gesture.
-    const origins = [...new Set(selected.filter(page => !page.bytes).map(page => new URL(page.url).origin + '/*'))];
+    const origins = [...new Set(selected.filter(page => !page.bytes && /^https?:/.test(page.url)).map(page => new URL(page.url).origin + '/*'))];
     busy = true;
     for (const control of document.querySelectorAll<HTMLButtonElement | HTMLInputElement>('button,input')) control.disabled = true;
-    const permission = browser.permissions.request({ origins });
+    const permission = origins.length ? browser.permissions.request({ origins }) : Promise.resolve(true);
     void safe(async () => {
       try {
         if (!await permission) throw new Error('Image host access was not granted.');
@@ -442,12 +627,21 @@
           throw new Error('Capture changed. Review the new list before exporting.');
         }
         missing = state.missing;
-        if (missing) throw new Error(missing + ' viewed image(s) are not loaded or broken. Return to the chapter and recapture after they load.');
+        if (missing) throw new Error(missing + ' chapter/viewed image(s) missing, unread or not loaded. Keep capture active while reading every chapter page, then refresh the review.');
         if (state.entries.some(entry => !entries.flatMap(originalPages).some(old => old.url === entry.url))) {
           await refresh();
           throw new Error('New images were found. Review them before exporting.');
         }
         await exportArchive(selected, titleInput.value, setStatus);
+        // Clear only derived thumbnails, only after Firefox confirms the download.
+        // Preserve captured originals and review edits for undo/re-export.
+        if (browser.runtime?.sendMessage) {
+          const savedMessage = statusElement.textContent;
+          try {
+            const cleared = await browser.runtime.sendMessage({ action: 'archive-preview-clear', tabId, generation });
+            if (cleared?.error) throw new Error(cleared.error);
+          } catch { setStatus(savedMessage + ' Thumbnail cache could not be cleared.'); }
+        }
       } finally {
         busy = false;
         for (const control of document.querySelectorAll<HTMLButtonElement | HTMLInputElement>('button,input')) control.disabled = false;
@@ -466,7 +660,8 @@
       const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
       if (tab?.id === undefined || !/^https?:/.test(tab.url || '')) throw new Error('Open an HTTP(S) chapter tab first.');
       tabId = tab.id;
-      await browser.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
+      sourceUrl = tab.url;
+      await browser.scripting.executeScript({ target: { tabId }, files: ['navigationScope.js', 'content.js'] });
       titleInput.value = new URL(tab.url).pathname.split('/').filter(Boolean).slice(-2).join(' - ') || 'chapter';
     }
     await refresh('status');
