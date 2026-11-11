@@ -2,6 +2,7 @@
   url: string; order: number; width: number; height: number; selected: boolean;
   bytes?: Uint8Array; sources?: ReviewPage[];
   pageNumber?: number; groupingNote?: string;
+  mergeLayout?: ReviewPage[];
 };
 
 function originalPages(page: ReviewPage): ReviewPage[] {
@@ -14,6 +15,8 @@ function includeReviewPage(page: ReviewPage, selected: boolean): void {
 }
 
 function mergeSelection(pages: ReviewPage[], selected: Set<string>): ReviewPage[] {
+  if (pages.some(page => selected.has(page.url) && !page.selected)) throw new Error('Include all selected pages before merging.');
+  pages = pages.filter(page => page.selected);
   const indices = pages.flatMap((page, index) => selected.has(page.url) ? [index] : []);
   if (indices.length < 2 || indices.length !== selected.size
     || indices.some((index, offset) => index !== indices[0] + offset)) {
@@ -26,14 +29,26 @@ function mergeSelection(pages: ReviewPage[], selected: Set<string>): ReviewPage[
 
 function replaceMergedPages(pages: ReviewPage[], sources: ReviewPage[], merged: ReviewPage): ReviewPage[] {
   const index = pages.indexOf(sources[0]);
-  if (index < 0 || sources.some((page, offset) => pages[index + offset] !== page)) {
+  const end = pages.indexOf(sources.at(-1)!);
+  const layout = pages.slice(index, end + 1);
+  const included = layout.filter(page => page.selected);
+  if (index < 0 || sources.length < 2 || included.length !== sources.length
+    || sources.some((page, offset) => included[offset] !== page)) {
     throw new Error('Page order changed. Select the pages again.');
   }
-  return [...pages.slice(0, index), merged, ...pages.slice(index + sources.length)];
+  // Retain excluded rows in the list and remember their original slots for undo.
+  merged.mergeLayout = layout;
+  const removed = new Set(sources);
+  return pages.flatMap(page => page === sources[0] ? [merged] : removed.has(page) ? [] : [page]);
 }
 
 function undoMergedPage(pages: ReviewPage[], page: ReviewPage): ReviewPage[] {
-  return pages.flatMap(current => current === page && page.sources ? page.sources : [current]);
+  if (!page.sources || !pages.includes(page)) return pages;
+  const layout = page.mergeLayout ?? page.sources;
+  const sources = new Set(page.sources);
+  const restored = layout.filter(item => sources.has(item) || pages.includes(item));
+  const gaps = new Set(restored.filter(item => !sources.has(item)));
+  return pages.flatMap(current => current === page ? restored : gaps.has(current) ? [] : [current]);
 }
 
 async function mergeImagesVertically(sources: ReviewPage[]): Promise<ReviewPage> {

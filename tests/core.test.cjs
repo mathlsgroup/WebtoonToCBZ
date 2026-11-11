@@ -303,7 +303,7 @@ test('suggestions number complete portrait pages and two/three-strip groups with
   const { pages, result } = suggestions(f, [
     {edge:edge(800,1200,true,true)},
     {edge:edge(800,500,true,false)}, {edge:edge(800,500,false,true)},
-    {edge:edge(800,300,true,false)}, {edge:edge(800,300)}, {edge:edge(800,300,false,true)},
+    {edge:edge(800,400,true,false)}, {edge:edge(800,400)}, {edge:edge(800,400,false,true)},
     {edge:edge(800,1200)},
   ]);
   assert.deepEqual(Array.from(result,s=>s.pageNumber),[1,2,2,3,3,3,4]);
@@ -329,14 +329,14 @@ test('ambiguous borders, complete landscapes, short groups, missing analysis and
   }
 });
 
-test('exclusions and portraits interrupt detection; a later valid start is still detected', () => {
+test('detection skips exclusions, respects included portrait boundaries and finds later groups', () => {
   const f = groupingFixture();
   const {result} = suggestions(f,[
     {edge:edge(800,500,true)}, {edge:edge(800,100),selected:false}, {edge:edge(800,500,false,true)},
     {edge:edge(800,500,true)}, {edge:edge(800,1200)}, {edge:edge(800,500,false,true)},
-    {edge:edge(800,500,true)}, {edge:edge(790,500,false,true)},
+    {edge:edge(800,500,true)}, {edge:edge(790,500,false,true)}, {edge:edge(800,1200)},
   ]);
-  assert.deepEqual(Array.from(result,s=>s.pageNumber),[1,undefined,2,3,4,5,6,6]);
+  assert.deepEqual(Array.from(result,s=>s.pageNumber),[1,undefined,1,2,3,4,5,5,6]);
 });
 
 test('numbered groups reject invalid numbers and separated duplicates without changing reading order', () => {
@@ -349,7 +349,7 @@ test('numbered groups reject invalid numbers and separated duplicates without ch
   pages[0].pageNumber=1; pages[2].pageNumber=1;
   assert.throws(()=>f.context.numberedPageGroups(pages),/consecutive/);
   pages[1].selected=false;
-  assert.throws(()=>f.context.numberedPageGroups(pages),/consecutive/);
+  assert.deepEqual(Array.from(f.context.numberedPageGroups(pages)[0],p=>p.url),['a','c']);
   pages[1].selected=true; pages[1].pageNumber=1;
   const groups=f.context.numberedPageGroups(pages);
   assert.deepEqual(Array.from(groups[0],p=>p.url),['a','b','c']);
@@ -380,11 +380,12 @@ test('edge analysis samples only the first/last native rows, caches bytes and cl
 });
 
 test('suggested groups merge to expected CBZ pages, retain single-page bytes and undo numbering', async () => {
-  const f=groupingFixture({sizes:[[800,500],[800,500],[800,300],[800,300],[800,300]]});
+  const f=groupingFixture({sizes:[[800,500],[800,500],[800,400],[800,400],[800,400]]});
   const {pages,result}=suggestions(f,[
     {edge:edge(800,500,true)}, {edge:edge(800,500,false,true)},
     {edge:edge(800,1200)},
-    {edge:edge(800,300,true)}, {edge:edge(800,300)}, {edge:edge(800,300,false,true)},
+    {edge:edge(800,400,true)}, {edge:edge(800,400)}, {edge:edge(800,400,false,true)},
+    {edge:edge(800,1200)},
   ]);
   result.forEach(s=>s.page.pageNumber=s.pageNumber);
   const groups=f.context.numberedPageGroups(pages);
@@ -394,15 +395,15 @@ test('suggested groups merge to expected CBZ pages, retain single-page bytes and
     const page=await f.context.mergeImagesVertically(sources);
     merged.push(page); current=f.context.replaceMergedPages(current,sources,page);
   }
-  assert.deepEqual(Array.from(current,p=>p.pageNumber),[1,2,3]);
+  assert.deepEqual(Array.from(current,p=>p.pageNumber),[1,2,3,4]);
   assert.equal(current[1],pages[2]);
   await f.context.exportArchive(current,'numbered',()=>{});
   const zip=await JSZip.loadAsync(await f.saved[0].arrayBuffer());
-  assert.deepEqual(Object.keys(zip.files),['0001.jpg','0002.jpg','0003.jpg']);
+  assert.deepEqual(Object.keys(zip.files),['0001.jpg','0002.jpg','0003.jpg','0004.jpg']);
   assert.deepEqual(await zip.file('0002.jpg').async('uint8array'),pages[2].bytes);
   for(const page of merged) current=f.context.undoMergedPage(current,page);
   current.forEach((page,i)=>assert.equal(page,pages[i]));
-  assert.deepEqual(Array.from(current,p=>p.pageNumber),[1,1,2,3,3,3]);
+  assert.deepEqual(Array.from(current,p=>p.pageNumber),[1,1,2,3,3,3,4]);
 });
 
 async function reviewFixture(options = {}) {
@@ -419,9 +420,10 @@ async function reviewFixture(options = {}) {
     } }; }
   }
   const ids=new Map();
-  for(const id of ['status','list','title','export','merge','undo','merge-numbered','detect','selection','numbering','start','stop','refresh','close-preview']) {
-    ids.set(id,new Element(id==='title'?'input':id==='status'||id==='list'||id==='selection'||id==='numbering'?'div':'button'));
+  for(const id of ['status','list','title','export','merge','undo','merge-numbered','detect','selection','numbering','start','stop','refresh','close-preview','hide-excluded','target-height','detect-height','height-tolerance']) {
+    ids.set(id,new Element(['title','hide-excluded','target-height','height-tolerance'].includes(id)?'input':id==='status'||id==='list'||id==='selection'||id==='numbering'?'div':'button'));
   }
+  ids.get('height-tolerance').valueAsNumber=1;
   function controls() {
     const found=new Set();
     function visit(element) {
@@ -431,7 +433,7 @@ async function reviewFixture(options = {}) {
     ids.forEach(visit);
     return [...found].filter(element=>['button','input'].includes(element.tagName));
   }
-  const source=['a','b','c','d'].map(url=>f.page(url));
+  const source=options.pages ? options.pages.map(page=>({...f.page(page.url),...page})) : ['a','b','c','d'].map(url=>f.page(url));
   const revoked=[], permissions=[];
   let objectId=0;
   Object.assign(f.context,{
@@ -517,7 +519,7 @@ test('review refuses export while numbered groups remain unapplied or numbers ar
 
 test('review suggestions fill the column without merging, and permission denial preserves edits', async () => {
   const f=await reviewFixture();
-  const edges=[edge(800,500,true),edge(800,500,false,true),edge(800,1200),edge(800,500)];
+  const edges=[edge(800,500,true),edge(800,500,false,true),edge(800,1200),edge(800,1200)];
   let next=0;
   f.context.inspectPageEdges=async()=>edges[next++];
   f.ids.get('detect').onclick(); await f.idle();
@@ -529,4 +531,214 @@ test('review suggestions fill the column without merging, and permission denial 
   denied.ids.get('detect').onclick(); await denied.idle();
   assert.deepEqual(denied.numbers().map(input=>input.value),['1','1','2','2']);
   assert.match(denied.ids.get('status').textContent,/not granted/);
+});
+
+test('automatic grouping checks merged ratio against consistent included portrait references', () => {
+  const f=groupingFixture();
+  const refs=[{edge:edge(800,1200)},{edge:edge(800,1200)}];
+  const valid=suggestions(f,[{edge:edge(800,600,true)},{edge:edge(800,600,false,true)},...refs]);
+  assert.deepEqual(Array.from(valid.result,s=>s.pageNumber),[1,1,2,3]);
+  for(const height of [450,750]) {
+    const invalid=suggestions(f,[{edge:edge(800,height,true)},{edge:edge(800,height,false,true)},...refs]);
+    assert.deepEqual(Array.from(invalid.result,s=>s.pageNumber),[1,2,3,4]);
+    assert.match(invalid.result[0].note,/ratio differs/);
+  }
+  // A disabled low-resolution preview must not bias the reference or split the group.
+  const skipped=suggestions(f,[
+    {edge:edge(800,600,true)}, {edge:edge(100,500,true,true),selected:false},
+    {edge:edge(800,600,false,true)},...refs,
+  ]);
+  assert.deepEqual(Array.from(skipped.result,s=>s.pageNumber),[1,undefined,1,2,3]);
+});
+
+test('missing or inconsistent portrait references require manual assignment; median resists one outlier', () => {
+  const f=groupingFixture();
+  const strips=[{edge:edge(800,600,true)},{edge:edge(800,600,false,true)}];
+  for(const refs of [[],[{edge:edge(800,1200)}],[{edge:edge(800,900)},{edge:edge(800,4000)}]]) {
+    const {result}=suggestions(f,[...strips,...refs]);
+    assert.notEqual(result[0].pageNumber,result[1].pageNumber);
+    assert.match(result[0].note,/No consistent ratio reference/);
+  }
+  const {result}=suggestions(f,[...strips,{edge:edge(800,1200)},{edge:edge(800,1200)},{edge:edge(800,4000)}]);
+  assert.equal(result[0].pageNumber,result[1].pageNumber);
+});
+
+test('merging across excluded previews preserves bytes, export order and exact undo layout', async () => {
+  const f=groupingFixture({sizes:[[800,600],[800,600]]});
+  const a={...f.page('a'),pageNumber:1};
+  const preview={...f.page('preview',f.png),selected:false,pageNumber:99};
+  const b={...f.page('b'),pageNumber:1};
+  const c={...f.page('c'),pageNumber:2};
+  const pages=[a,preview,b,c];
+  const sources=f.context.numberedPageGroups(pages)[0];
+  assert.deepEqual(Array.from(f.context.mergeSelection(pages,new Set(['a','b'])),page=>page.url),['a','b']);
+  const merged=await f.context.mergeImagesVertically(sources);
+  const current=f.context.replaceMergedPages(pages,sources,merged);
+  assert.deepEqual(Array.from(current,page=>page.url),[merged.url,'preview','c']);
+  assert.equal(current[1].selected,false);
+  assert.equal(current[1].bytes,f.png);
+  await f.context.exportArchive(current.filter(page=>page.selected),'skip previews',()=>{});
+  const zip=await JSZip.loadAsync(await f.saved[0].arrayBuffer());
+  assert.deepEqual(Object.keys(zip.files),['0001.jpg','0002.jpg']);
+  assert.deepEqual(await zip.file('0002.jpg').async('uint8array'),c.bytes);
+  const restored=f.context.undoMergedPage(current,merged);
+  restored.forEach((page,index)=>assert.equal(page,pages[index]));
+  assert.equal(restored.length,4);
+  assert.throws(()=>f.context.replaceMergedPages([a,{...preview,selected:true},b,c],sources,merged),/order changed/);
+});
+
+test('nested and independent merges across multiple excluded rows restore original order without duplicates', () => {
+  const f=groupingFixture();
+  const [a,x,b,c,y,d]=['a','x','b','c','y','d'].map(url=>f.page(url));
+  x.selected=false; y.selected=false;
+  const original=[a,x,b,c,y,d];
+  const first={...f.page('first'),sources:[a,b]};
+  const second={...f.page('second'),sources:[c,d]};
+  let current=f.context.replaceMergedPages(original,first.sources,first);
+  current=f.context.replaceMergedPages(current,second.sources,second);
+  const outer={...f.page('outer'),sources:[first,second]};
+  current=f.context.replaceMergedPages(current,outer.sources,outer);
+  current=f.context.undoMergedPage(current,outer);
+  current=f.context.undoMergedPage(current,second);
+  current=f.context.undoMergedPage(current,first);
+  assert.equal(current.length,original.length);
+  current.forEach((page,index)=>assert.equal(page,original[index]));
+});
+
+test('review hides disabled images reversibly and merges numbered strips across them', async () => {
+  const f=await reviewFixture({sizes:[[800,600],[800,600]]});
+  const excluded=f.rows()[1].children[0];
+  excluded.checked=false; excluded.onchange();
+  await new Promise(setImmediate);
+  f.setNumbers([1,99,1,2]);
+  assert.equal(f.ids.get('merge-numbered').disabled,false);
+  const hide=f.ids.get('hide-excluded');
+  hide.checked=true; hide.onchange();
+  assert.deepEqual(f.rows().map(row=>row.hidden),[false,true,false,false]);
+  f.ids.get('merge-numbered').onclick(); await f.idle();
+  assert.equal(f.rows().length,3);
+  assert.deepEqual(f.rows().map(row=>row.hidden),[false,true,false]);
+  f.ids.get('undo').onclick();
+  assert.deepEqual(f.numbers().map(input=>input.value),['1','99','1','2']);
+  assert.deepEqual(f.rows().map(row=>row.hidden),[false,true,false,false]);
+  hide.checked=false; hide.onchange();
+  assert.equal(f.rows().some(row=>row.hidden),false);
+  const include=f.rows()[1].children[0];
+  include.checked=true; include.onchange();
+  assert.equal(f.ids.get('merge-numbered').disabled,true);
+});
+
+function heightStrips(f, heights, width=1280) {
+  return heights.map((height,index)=>({...f.page('strip-'+index),width,height}));
+}
+
+test('height fallback groups the supplied six-strip example into exactly 1813 px without reference pages', async () => {
+  const heights=[302,302,302,303,302,302];
+  const f=groupingFixture({sizes:heights.map(height=>[1280,height])});
+  const pages=heightStrips(f,heights);
+  const suggested=f.context.suggestPagesByHeight(pages,1813);
+  assert.deepEqual(Array.from(suggested,s=>s.pageNumber),[1,1,1,1,1,1]);
+  assert.equal(pages[0].pageNumber,undefined); // Suggestions do not mutate input.
+  suggested.forEach(s=>s.page.pageNumber=s.pageNumber);
+  const sources=f.context.numberedPageGroups(pages)[0];
+  const merged=await f.context.mergeImagesVertically(sources);
+  assert.equal(merged.width,1280); assert.equal(merged.height,1813);
+  const current=f.context.replaceMergedPages(pages,sources,merged);
+  assert.equal(current.length,1);
+  await f.context.exportArchive(current,'height example',()=>{});
+  const zip=await JSZip.loadAsync(await f.saved[0].arrayBuffer());
+  assert.deepEqual(Object.keys(zip.files),['0001.jpg']);
+  const restored=f.context.undoMergedPage(current,merged);
+  restored.forEach((page,index)=>assert.equal(page,pages[index]));
+});
+
+test('height fallback resynchronizes after unmatched strips, skips excluded previews and preserves complete pages', () => {
+  const f=groupingFixture();
+  const heights=[302,302,302,303,302,302];
+  const first=heightStrips(f,heights);
+  const second=heightStrips(f,heights).map(page=>({...page,url:page.url+'-second'}));
+  const excluded={...f.page('preview'),selected:false,width:100,height:70};
+  const full={...f.page('full'),width:1280,height:1813};
+  const orphan={...f.page('orphan'),width:1280,height:50};
+  const tail={...f.page('tail'),width:1280,height:302};
+  const pages=[orphan,...first.slice(0,2),excluded,...first.slice(2),full,...second,tail];
+  const suggested=f.context.suggestPagesByHeight(pages,1813);
+  assert.deepEqual(Array.from(suggested,s=>s.pageNumber),[1,2,2,undefined,2,2,2,2,3,4,4,4,4,4,4,5]);
+  assert.match(suggested[0].note,/No group within/);
+  assert.match(suggested[8].note,/Already at target/);
+  assert.match(suggested.at(-1).note,/No group within/);
+  suggested.forEach(s=>s.page.pageNumber=s.pageNumber);
+  assert.equal(f.context.numberedPageGroups(pages).length,2);
+  assert.equal(full.bytes,f.jpg);
+});
+
+test('height fallback rejects invalid targets and never merges overshoots, width mismatches or existing merges', () => {
+  const f=groupingFixture();
+  for(const target of [0,-1,NaN,Infinity,1813.5,32768]) {
+    assert.throws(()=>f.context.suggestPagesByHeight([],target),/whole target height/);
+  }
+  for(const pages of [
+    heightStrips(f,[900,914]),
+    heightStrips(f,[900,913]).map((page,index)=>({...page,width:index?600:1280})),
+    heightStrips(f,[900,913]).map((page,index)=>index?{...page,sources:[f.page('original')]}:page),
+    heightStrips(f,[900,913]).map((page,index)=>({...page,height:index?NaN:900})),
+  ]) {
+    const result=f.context.suggestPagesByHeight(pages,1813,0);
+    assert.deepEqual(Array.from(result,s=>s.pageNumber),[1,2]);
+  }
+});
+
+test('review height button proposes groups, validates target without changing edits, and retains merge/undo workflow', async () => {
+  const heights=[302,302,302,303,302,302];
+  const f=await reviewFixture({
+    sizes:heights.map(height=>[1280,height]),
+    pages:heights.map((height,index)=>({url:'image-'+index,width:1280,height})),
+  });
+  f.ids.get('target-height').valueAsNumber=1813;
+  f.ids.get('detect-height').onclick();
+  assert.equal(f.rows().length,6);
+  assert.deepEqual(f.numbers().map(input=>input.value),['1','1','1','1','1','1']);
+  assert.match(f.ids.get('status').textContent,/1 group\(s\) suggested near 1813 px/);
+  assert.equal(f.permissions.length,0); // Captured dimensions need no network access.
+  f.ids.get('target-height').valueAsNumber=0;
+  f.ids.get('detect-height').onclick();
+  assert.match(f.ids.get('status').textContent,/whole target height/);
+  assert.deepEqual(f.numbers().map(input=>input.value),['1','1','1','1','1','1']);
+  f.ids.get('merge-numbered').onclick(); await f.idle();
+  assert.equal(f.rows().length,1);
+  assert.match(f.rows()[0].children[2].textContent,/1280.*1813/);
+  f.ids.get('undo').onclick();
+  assert.equal(f.rows().length,6);
+});
+
+test('height tolerance accepts both bounds, rejects outside values and chooses the closest total', () => {
+  const f=groupingFixture();
+  for(const height of [490,510]) {
+    const result=f.context.suggestPagesByHeight(heightStrips(f,[500,height]),1000,1);
+    assert.deepEqual(Array.from(result,s=>s.pageNumber),[1,1]);
+    assert.match(result[0].note,new RegExp('total height '+(500+height)+' px'));
+  }
+  for(const height of [489,511]) {
+    const result=f.context.suggestPagesByHeight(heightStrips(f,[500,height]),1000,1);
+    assert.deepEqual(Array.from(result,s=>s.pageNumber),[1,2]);
+  }
+  const closest=f.context.suggestPagesByHeight(heightStrips(f,[500,490,10]),1000,1);
+  assert.deepEqual(Array.from(closest,s=>s.pageNumber),[1,1,1]);
+  assert.match(closest[0].note,/total height 1000 px/);
+  const full=f.context.suggestPagesByHeight(heightStrips(f,[995,5]),1000,1);
+  assert.deepEqual(Array.from(full,s=>s.pageNumber),[1,2]);
+  for(const tolerance of [-1,NaN,Infinity,11]) {
+    assert.throws(()=>f.context.suggestPagesByHeight([],1000,tolerance),/height tolerance/);
+  }
+});
+
+test('review forwards adjustable height tolerance, including exact matching at zero', async () => {
+  const f=await reviewFixture({pages:[{url:'a',width:800,height:500},{url:'b',width:800,height:495}]});
+  f.ids.get('target-height').valueAsNumber=1000;
+  f.ids.get('height-tolerance').valueAsNumber=1;
+  f.ids.get('detect-height').onclick();
+  assert.deepEqual(f.numbers().map(input=>input.value),['1','1']);
+  f.ids.get('height-tolerance').valueAsNumber=0;
+  f.ids.get('detect-height').onclick();
+  assert.deepEqual(f.numbers().map(input=>input.value),['1','2']);
 });

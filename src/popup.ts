@@ -16,6 +16,10 @@
   const undoButton = document.getElementById('undo') as HTMLButtonElement | null;
   const numberedMergeButton = document.getElementById('merge-numbered') as HTMLButtonElement | null;
   const detectButton = document.getElementById('detect') as HTMLButtonElement | null;
+  const hideExcluded = document.getElementById('hide-excluded') as HTMLInputElement | null;
+  const heightButton = document.getElementById('detect-height') as HTMLButtonElement | null;
+  const targetHeightInput = document.getElementById('target-height') as HTMLInputElement | null;
+  const heightToleranceInput = document.getElementById('height-tolerance') as HTMLInputElement | null;
   const objectUrls = new Set<string>();
   const mergeHistory: string[] = [];
   function ensurePageNumbers(): void {
@@ -31,7 +35,8 @@
     catch (error) { if (mergeSelected.size) message = String(error); }
     mergeButton.disabled = busy || !valid;
     undoButton.disabled = busy || !entries.some(page => page.sources);
-    document.getElementById('selection')!.textContent = entries.length + ' pages. ' + message;
+    document.getElementById('selection')!.textContent = entries.filter(page => page.selected).length + ' included, '
+      + entries.filter(page => !page.selected).length + ' excluded. ' + message;
     try {
       const groups = numberedPageGroups(entries);
       numberedMergeButton!.disabled = busy || !groups.length;
@@ -43,6 +48,7 @@
       document.getElementById('numbering')!.textContent = String(error);
     }
     detectButton!.disabled = busy || !entries.some(page => page.selected);
+    heightButton!.disabled = busy || !entries.some(page => page.selected);
     const counts = new Map<number, number>();
     for (const page of entries) if (page.selected && page.pageNumber !== undefined) {
       counts.set(page.pageNumber, (counts.get(page.pageNumber) ?? 0) + 1);
@@ -128,10 +134,12 @@
     entries.forEach((item, index) => {
       const row = document.createElement('div');
       row.className = 'entry' + (mergeSelected.has(item.url) ? ' merge-selected' : '');
+      row.hidden = !!hideExcluded?.checked && !item.selected;
       const check = document.createElement('input');
       check.type = 'checkbox'; check.checked = item.selected;
       check.setAttribute('aria-label', 'Include page ' + (index + 1));
       check.onchange = () => {
+        if (!check.checked) mergeSelected.delete(item.url);
         includeReviewPage(item, check.checked); render();
         void safe(async () => { for (const source of originalPages(item)) { source.selected = item.selected; await send('select', { url: source.url, selected: item.selected }); } });
       };
@@ -174,11 +182,13 @@
           restore.disabled = busy; restore.onclick = () => undo(item); row.append(restore);
         }
         for (const [label, offset] of [['Up', -1], ['Down', 1]] as const) {
+          let target = index + offset;
+          while (hideExcluded?.checked && target >= 0 && target < entries.length && !entries[target].selected) target += offset;
           const button = document.createElement('button');
           button.textContent = label;
-          button.disabled = index + offset < 0 || index + offset >= entries.length;
+          button.disabled = target < 0 || target >= entries.length;
           button.onclick = () => {
-            [entries[index], entries[index + offset]] = [entries[index + offset], entries[index]];
+            [entries[index], entries[target]] = [entries[target], entries[index]];
             render();
             void safe(async () => { await syncOrder(); });
           };
@@ -223,6 +233,23 @@
   titleInput.oninput = () => { void safe(async () => { await send('title', { title: titleInput.value }); }); };
 
   if (review) {
+    hideExcluded!.onchange = () => { if (!busy) render(); };
+    heightButton!.onclick = () => {
+      if (busy) return;
+      try {
+        const target = targetHeightInput!.valueAsNumber;
+        const tolerance = heightToleranceInput!.valueAsNumber;
+        const suggestions = suggestPagesByHeight(entries, target, tolerance);
+        for (const suggestion of suggestions) {
+          suggestion.page.pageNumber = suggestion.pageNumber;
+          suggestion.page.groupingNote = suggestion.note;
+        }
+        render();
+        const groups = numberedPageGroups(entries);
+        setStatus(groups.length + ' group(s) suggested near ' + target + ' px (tolerance ' + tolerance + '%) using captured dimensions. '
+          + 'Check the groups, then click Merge numbered pages. Unmatched images remain separate.');
+      } catch (error) { setStatus(String(error)); }
+    };
     document.getElementById('close-preview')!.onclick = () => (document.getElementById('large-preview') as HTMLDialogElement).close();
     undoButton!.onclick = () => {
       const page = [...mergeHistory].reverse().map(url => entries.find(entry => entry.url === url)).find(entry => entry?.sources);

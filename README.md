@@ -50,17 +50,48 @@ The review toolbar stays visible while scrolling. Each image has an editable
 **Page number** column. Give consecutive included strips the same number, then
 click **Merge numbered pages** to apply all groups at once. Number labels do not
 sort the list: the current reading order remains authoritative, and CBZ filenames
-are numbered sequentially. Repeated numbers across nonconsecutive rows are rejected,
-including groups interrupted by excluded images. Pending groups must be merged
-or assigned separate numbers before export.
+are numbered sequentially. Excluded images between strips are ignored by both
+numbered and checkbox merging; an included image belonging to another page still
+interrupts the group. Pending groups must be merged or assigned separate numbers
+before export. Uncheck unwanted next-chapter previews, then use **Hide excluded
+images** to hide them without deleting them. Uncheck this option to show them again
+and restore inclusion if needed. No images are excluded automatically by resolution.
 
 **Suggest page numbers** downloads/decodes included images locally, then proposes
 numbers without merging. It replaces current assignments, so run it before making
 manual corrections. It looks for consecutive landscape strips starting with a
 white top border and ending with a white bottom border, whose combined height is
-greater than their maximum width. Widths must agree within 5%. Portrait pages and
-already merged pages stay separate. Exclusions, unavailable images, new white top
-borders, and portrait pages interrupt a candidate group.
+greater than their maximum width. Widths must agree within 5%. The final height/width
+ratio must also be within 20% of the median ratio of included complete portrait
+pages (including already merged pages). At least two such reference pages are
+required, with at least two thirds of them within 20% of that median. Excluded
+previews do not contribute to the reference. When references are missing or
+inconsistent, candidate strips remain separate with an explanation; manual numbering
+and merging remain available without a ratio restriction.
+
+Portrait pages and already merged pages stay separate. Excluded images are skipped
+throughout detection; unavailable included images, new white top borders and included
+portrait pages interrupt a candidate group.
+
+If border-based suggestions fail, enter **Target page height (px)** (initially blank;
+there is no predefined height) and click
+**Suggest by height**. For example, five 302 px strips plus one 303 px strip total
+1813 px. This separate fallback replaces the current numbering using captured
+dimensions, without fetching images, checking white borders or requiring reference
+portrait pages. It proposes groups only; inspect the numbers and then click
+**Merge numbered pages**. Existing merges and images already at the target height
+remain separate. Included images are processed in reading order; excluded images
+are skipped. Group widths must agree within 5%. Summed heights must fall within the chosen
+**Tolerance (%)**, default 1%, adjustable from 0 to 10% (0 requires an exact match).
+When several totals fit, the closest to the target is preferred; ties use fewer strips.
+The row note shows the actual proposed height. Images already near the target remain separate. Nothing is resized, cropped or padded to reach the requested height.
+
+Incomplete groups, invalid dimensions and groups outside the tolerance stay
+separate with a note. The search resumes at the next included image, so an unmatched
+strip does not prevent later matches. This can still propose incorrect boundaries
+when starting midway through a page: verify alignment visually before merging.
+Height must be a whole number from 1 to 32767; Canvas memory limits still apply
+when the proposed groups are merged. This mode also replaces manual assignments.
 
 The detector inspects the first/last three native pixel rows. One row with at least
 98% near-white pixels (RGB channels at least 245, composited over white) counts as
@@ -72,7 +103,8 @@ source bytes are reused for merging/export without modifying them.
 
 Batch merging is transactional: if any group fails, the current list is retained
 and provisional merged images are released. Each successful group can be undone
-independently, restoring its original numbering and image bytes. After undo, use
+independently, restoring its original numbering, image bytes and the original slots
+of interleaved excluded rows that are still present. After undo, use
 different numbers if the restored strips should be exported separately. Numbering,
 like merges, exists only in the current review tab. No new permissions are added.
 

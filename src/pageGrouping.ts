@@ -44,9 +44,23 @@ async function inspectPageEdges(page: ReviewPage): Promise<PageEdges> {
   }
 }
 
+// Use full included portrait pages only; proposed strips never validate themselves.
+function referencePageRatio(pages: ReviewPage[], edges: Map<string, PageEdges>): number | undefined {
+  const ratios = pages.filter(page => page.selected).flatMap(page => {
+    const edge = edges.get(page.url);
+    return edge && edge.width > 0 && edge.height > edge.width ? [edge.height / edge.width] : [];
+  }).sort((a, b) => a - b);
+  if (ratios.length < 2) return undefined;
+  const middle = Math.floor(ratios.length / 2);
+  const median = ratios.length % 2 ? ratios[middle] : (ratios[middle - 1] + ratios[middle]) / 2;
+  const matching = ratios.filter(ratio => Math.abs(ratio / median - 1) <= 0.20);
+  return matching.length >= 2 && matching.length / ratios.length >= 2 / 3 ? median : undefined;
+}
+
 // Suggestions only: never merge or mutate pages during boundary detection.
 function suggestPageNumbers(pages: ReviewPage[], edges: Map<string, PageEdges>): PageSuggestion[] {
   const result: PageSuggestion[] = [];
+  const reference = referencePageRatio(pages, edges);
   let number = 1;
   let index = 0;
   while (index < pages.length) {
@@ -56,29 +70,92 @@ function suggestPageNumbers(pages: ReviewPage[], edges: Map<string, PageEdges>):
     }
     const first = edges.get(page.url);
     let end = index;
+    let rejection = '';
     if (first && first.width > first.height && first.topWhite && !first.bottomWhite && !page.sources) {
       let height = first.height;
       let minWidth = first.width, maxWidth = first.width;
       for (let next = index + 1; next < pages.length; next++) {
         const candidate = pages[next], edge = edges.get(candidate.url);
-        // Portrait pages, exclusions and new starts are hard boundaries.
-        if (!candidate.selected || candidate.sources || !edge || edge.width <= edge.height || edge.topWhite) break;
+        if (!candidate.selected) continue;
+        // Included portraits, failed analyses and new starts are hard boundaries.
+        if (candidate.sources || !edge || edge.width <= edge.height || edge.topWhite) break;
         minWidth = Math.min(minWidth, edge.width); maxWidth = Math.max(maxWidth, edge.width);
         if (minWidth / maxWidth < 0.95) break;
         height += edge.height;
         if (edge.bottomWhite) {
-          if (height > maxWidth) end = next;
+          if (height > maxWidth) {
+            if (reference === undefined) rejection = 'No consistent ratio reference: at least two similar included portrait pages are needed. Check manually.';
+            else if (Math.abs((height / maxWidth) / reference - 1) > 0.20) rejection = 'Combined ratio differs from the chapter portrait pages by more than 20%. Kept separate.';
+            else end = next;
+          }
           break;
         }
       }
     }
-    const note = end > index ? 'Suggested group: white top/bottom borders and combined portrait ratio. Verify before merging.'
+    const note = end > index ? 'Suggested group: white borders and ratio within 20% of the chapter portrait pages. Verify before merging.'
+      : rejection ? rejection
       : !first ? 'Analysis unavailable. Kept separate; check manually.'
       : page.sources || first.height > first.width ? 'Portrait page kept separate.'
       : 'Uncertain landscape image: no complete strip group found. Kept separate.';
     for (let member = index; member <= end; member++) {
-      result.push({ page: pages[member], pageNumber: number, note });
+      result.push(pages[member].selected ? { page: pages[member], pageNumber: number, note }
+        : { page: pages[member], note: 'Excluded' });
     }
+    number++; index = end + 1;
+  }
+  return result;
+}
+
+// Explicit fallback: group by a target height without relying on white borders
+// or complete portrait reference pages. Never resize, crop, or consume partial groups.
+function suggestPagesByHeight(pages: ReviewPage[], targetHeight: number, tolerancePercent = 1): PageSuggestion[] {
+  if (!Number.isSafeInteger(targetHeight) || targetHeight < 1 || targetHeight > 32767) {
+    throw new Error('Enter a whole target height between 1 and 32767 pixels.');
+  }
+  if (!Number.isFinite(tolerancePercent) || tolerancePercent < 0 || tolerancePercent > 10) {
+    throw new Error('Enter a height tolerance between 0 and 10 percent.');
+  }
+  const tolerance = targetHeight * tolerancePercent / 100;
+  const minimum = Math.ceil(targetHeight - tolerance - 1e-9);
+  const maximum = Math.min(32767, Math.floor(targetHeight + tolerance + 1e-9));
+  const validDimensions = (page: ReviewPage): boolean => Number.isSafeInteger(page.width)
+    && page.width > 0 && Number.isSafeInteger(page.height) && page.height > 0;
+  const result: PageSuggestion[] = [];
+  let number = 1;
+  let index = 0;
+  while (index < pages.length) {
+    const first = pages[index];
+    if (!first.selected) { result.push({ page: first, note: 'Excluded' }); index++; continue; }
+    let end = index;
+    let bestHeight = first.height;
+    if (!first.sources && validDimensions(first) && first.height < minimum) {
+      let height = first.height;
+      let minWidth = first.width, maxWidth = first.width;
+      for (let next = index + 1; next < pages.length; next++) {
+        const candidate = pages[next];
+        if (!candidate.selected) continue;
+        if (candidate.sources || !validDimensions(candidate)) break;
+        minWidth = Math.min(minWidth, candidate.width); maxWidth = Math.max(maxWidth, candidate.width);
+        if (minWidth / maxWidth < 0.95) break;
+        height += candidate.height;
+        if (height > maximum) break;
+        if (height >= minimum && (end === index || Math.abs(height - targetHeight) < Math.abs(bestHeight - targetHeight))) {
+          end = next; bestHeight = height;
+        }
+        if (height === targetHeight) break;
+      }
+    }
+    const note = end > index ? 'Suggested group: total height ' + bestHeight + ' px (target ' + targetHeight
+      + ' px, tolerance ' + tolerancePercent + '%). Verify alignment before merging.'
+      : first.sources ? 'Already merged page kept separate.'
+      : !validDimensions(first) ? 'Image dimensions unavailable. Kept separate; check manually.'
+      : first.height >= minimum && first.height <= maximum ? 'Already at target height within tolerance (' + first.height + ' px). Kept separate.'
+      : 'No group within ' + tolerancePercent + '% of ' + targetHeight + ' px found. Kept separate; check manually.';
+    for (let member = index; member <= end; member++) {
+      result.push(pages[member].selected ? { page: pages[member], pageNumber: number, note }
+        : { page: pages[member], note: 'Excluded' });
+    }
+    // A failed candidate advances by one image, allowing later groups to resynchronize.
     number++; index = end + 1;
   }
   return result;
@@ -86,8 +163,7 @@ function suggestPageNumbers(pages: ReviewPage[], edges: Map<string, PageEdges>):
 
 function numberedPageGroups(pages: ReviewPage[]): ReviewPage[][] {
   const groups = new Map<number, { page: ReviewPage; index: number }[]>();
-  pages.forEach((page, index) => {
-    if (!page.selected) return;
+  pages.filter(page => page.selected).forEach((page, index) => {
     const number = page.pageNumber;
     if (number === undefined || !Number.isSafeInteger(number) || number < 1) {
       throw new Error('Enter a positive whole page number for every included image.');
@@ -98,7 +174,7 @@ function numberedPageGroups(pages: ReviewPage[]): ReviewPage[][] {
   const result: ReviewPage[][] = [];
   for (const [number, group] of groups) {
     if (group.some((entry, offset) => entry.index !== group[0].index + offset)) {
-      throw new Error('Page ' + number + ': images with the same number must be consecutive (no excluded image between them).');
+      throw new Error('Page ' + number + ': only excluded images may separate images with the same number. Included images must be consecutive.');
     }
     if (group.length > 1) result.push(group.map(entry => entry.page));
   }
