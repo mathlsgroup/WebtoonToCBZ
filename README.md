@@ -2,7 +2,8 @@
 
 Firefox-first extension for archiving images you are authorized to save. Captures
 image URLs while you read, offers review and ordering, and exports an ordinary ZIP
-with a .cbz extension. No image conversion, telemetry, accounts, or external services.
+with a .cbz extension. Unmerged images retain their original bytes. No telemetry,
+accounts, or external services.
 
 ## Requirements and commands
 
@@ -42,6 +43,28 @@ Exclusions, title, and manual ordering are retained in the source document until
 a new capture starts or that document is closed/reloaded/navigated. Refresh does
 not reset these choices. Source navigation invalidates an open review; it must
 not silently export stale data.
+
+## Manual vertical merging
+
+In the review tab, use the **Merge** checkboxes to select at least two consecutive,
+included pages, then click **Merge vertically**. These checkboxes are separate from
+the inclusion checkboxes. Nothing is merged automatically. Use **Preview** to inspect
+the full result. Narrower strips are centered on white without resizing or cropping.
+All-JPEG selections produce JPEG at quality 0.95; other combinations produce PNG.
+Animated inputs are flattened to the frame decoded by the browser.
+
+Each merged row has **Undo merge**; the toolbar restores the latest visible merge.
+Independent and nested merges retain their sources and can be undone even after
+selection or ordering changes. Export uses the current included pages in review order.
+Original bytes fetched for merging remain cached for undo/export. Other pages are
+fetched normally and are never re-encoded. Image-server access may be requested at merge time.
+
+Merges and their cached bytes live only in the current review tab. Refresh with the
+toolbar preserves them; reloading/closing that tab loses them. Start a new capture
+to discard all edits. The canvas is limited to 32767 pixels per side and 64 megapixels
+as a conservative memory budget; Firefox may impose lower limits. Allocation,
+decoding and encoding failures are reported without replacing the selected pages.
+Large merges can briefly occupy the UI thread and use substantial memory.
 
 ## Capture and ordering
 

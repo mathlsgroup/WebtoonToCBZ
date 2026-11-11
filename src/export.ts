@@ -30,16 +30,23 @@ function archiveFilename(input: string): string {
   return name + '.cbz';
 }
 
-async function exportArchive(urls: string[], title: string, report: (message: string) => void): Promise<void> {
+async function fetchImageBytes(url: string): Promise<Uint8Array> {
+  const response = await fetch(url, { credentials: 'include', signal: AbortSignal.timeout(30000) });
+  if (!response.ok) throw new Error('HTTP ' + response.status + '. No archive exported.');
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  try { imageExtension(bytes); }
+  catch { throw new Error('Unsupported or invalid data (JPEG, PNG, GIF, WebP or AVIF required).'); }
+  return bytes;
+}
+
+async function exportArchive(urls: (string | { url: string; bytes?: Uint8Array })[], title: string, report: (message: string) => void): Promise<void> {
   const zip = new JSZip();
-  for (const [index, url] of urls.entries()) {
+  for (const [index, page] of urls.entries()) {
     report('Fetching image ' + (index + 1) + '/' + urls.length + '... Keep this review tab open.');
-    let response: Response;
+    let bytes: Uint8Array;
     try {
-      response = await fetch(url, { credentials: 'include', signal: AbortSignal.timeout(30000) });
-    } catch { throw new Error('Image ' + (index + 1) + ' could not be fetched. No archive exported.'); }
-    if (!response.ok) throw new Error('Image ' + (index + 1) + ': HTTP ' + response.status + '. No archive exported.');
-    const bytes = new Uint8Array(await response.arrayBuffer());
+      bytes = typeof page === 'string' ? await fetchImageBytes(page) : page.bytes ?? await fetchImageBytes(page.url);
+    } catch (error) { throw new Error('Image ' + (index + 1) + ': ' + String(error) + ' No archive exported.'); }
     let extension: string;
     try { extension = imageExtension(bytes); }
     catch { throw new Error('Image ' + (index + 1) + ' has unsupported or invalid data. No archive exported.'); }

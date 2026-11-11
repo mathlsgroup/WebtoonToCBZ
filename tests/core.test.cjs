@@ -164,3 +164,107 @@ test('interrupted downloads never report successful saving', async () => {
   await assert.rejects(f.context.exportArchive(['a'], 'Chapter', message => reports.push(message)), /interrupted/);
   assert.equal(reports.some(message => message.startsWith('Saved ')), false);
 });
+
+function mergerFixture(options = {}) {
+  const draws = [], closed = [];
+  let index = 0;
+  const jpg = Uint8Array.from([255,216,255,23]);
+  const png = Uint8Array.from([137,80,78,71,13,10,26,10,42]);
+  const f = exporterFixture({});
+  Object.assign(f.context, {
+    Set, Error,
+    createImageBitmap: async () => {
+      if (options.decodeError) throw new Error('decode failed');
+      const size = (options.sizes || [[800,200],[600,300],[800,250]])[index++];
+      return { width: size[0], height: size[1], close() { closed.push(size); } };
+    },
+    document: { createElement() { return {
+      getContext() { return options.noContext ? null : {
+        fillRect(...args) { draws.push(['white', ...args]); },
+        drawImage(image, x, y) { draws.push([x,y,image.width,image.height]); },
+      }; },
+      toBlob(callback, type, quality) {
+        draws.push([type,quality]);
+        callback(options.noBlob ? null : new Blob([type === 'image/jpeg' ? jpg : png]));
+      },
+    }; } },
+  });
+  vm.runInContext(fs.readFileSync('dist/imageMerger.js','utf8'),f.context);
+  const page = (url, bytes = jpg) => ({url, order:0, width:800, height:200, selected:true, bytes});
+  return { ...f, draws, closed, page, jpg, png };
+}
+
+test('Canvas merges two JPEGs at quality .95, centers unequal widths and releases bitmaps', async () => {
+  const f = mergerFixture();
+  const a=f.page('a'), b=f.page('b');
+  const merged=await f.context.mergeImagesVertically([a,b]);
+  assert.equal(merged.width,800); assert.equal(merged.height,500);
+  assert.deepEqual(f.draws, [['white',0,0,800,500],[0,0,800,200],[100,200,600,300],['image/jpeg',.95]]);
+  assert.equal(f.closed.length,2);
+  assert.equal(merged.sources[0],a);
+  assert.equal(a.bytes,f.jpg);
+});
+
+test('three mixed strips use PNG and preserve complete pages, order and exact CBZ bytes', async () => {
+  const f=mergerFixture();
+  const sources=[f.page('a'),f.page('b',f.png),f.page('c')];
+  const complete=f.page('complete');
+  const merged=await f.context.mergeImagesVertically(sources);
+  assert.equal(merged.height,750);
+  assert.equal(f.draws.at(-1)[0],'image/png');
+  const pages=f.context.replaceMergedPages([...sources,complete],sources,merged);
+  assert.equal(pages[1],complete); assert.equal(complete.bytes,f.jpg);
+  await f.context.exportArchive(pages,'merged',()=>{});
+  const zip=await JSZip.loadAsync(await f.saved[0].arrayBuffer());
+  assert.deepEqual(Object.keys(zip.files),['0001.png','0002.jpg']);
+  assert.deepEqual(await zip.file('0001.png').async('uint8array'),f.png);
+  assert.deepEqual(await zip.file('0002.jpg').async('uint8array'),f.jpg);
+});
+
+test('selection rejects gaps, empty, single and excluded pages', () => {
+  const f=mergerFixture(), pages=['a','b','c'].map(url=>f.page(url));
+  for (const ids of [[],['a'],['a','c'],['a','missing']]) {
+    assert.throws(()=>f.context.mergeSelection(pages,new Set(ids)),/consecutive/);
+  }
+  assert.equal(f.context.mergeSelection(pages,new Set(['b','a']))[0],pages[0]);
+  pages[1].selected=false;
+  assert.throws(()=>f.context.mergeSelection(pages,new Set(['a','b'])),/Include/);
+});
+
+test('independent and nested undo restores original identities, formats, bytes and order', () => {
+  const f=mergerFixture(), originals=['a','b','c','d'].map(url=>f.page(url));
+  originals[1].bytes=f.png;
+  const first={...f.page('merged1'),sources:originals.slice(0,2)};
+  const second={...f.page('merged2'),sources:originals.slice(2)};
+  let pages=f.context.replaceMergedPages(originals,first.sources,first);
+  pages=f.context.replaceMergedPages(pages,second.sources,second);
+  const nested={...f.page('nested'),sources:pages};
+  pages=f.context.undoMergedPage([nested],nested);
+  pages=f.context.undoMergedPage(pages,first);
+  pages=f.context.undoMergedPage(pages,second);
+  assert.equal(pages.length,4);
+  pages.forEach((page,index)=>assert.equal(page,originals[index]));
+  assert.equal(pages[1].bytes,f.png);
+});
+
+test('merge failures leave pages in place and close decoded resources', async () => {
+  for (const options of [{decodeError:true},{noContext:true},{noBlob:true},{sizes:[[800,20000],[800,20000]]}]) {
+    const f=mergerFixture(options), pages=[f.page('a'),f.page('b')];
+    await assert.rejects(f.context.mergeImagesVertically(pages),/Merge failed/);
+    assert.deepEqual(pages.map(page=>page.url),['a','b']);
+    if (!options.decodeError) assert.equal(f.closed.length,2);
+  }
+});
+
+test('excluding a nested merge also excludes restored intermediate pages', () => {
+  const f=mergerFixture();
+  const a=f.page('a'), b=f.page('b'), c=f.page('c');
+  const first={...f.page('first'),sources:[a,b]};
+  const outer={...f.page('outer'),sources:[first,c]};
+  f.context.includeReviewPage(outer,false);
+  const restored=f.context.undoMergedPage([outer],outer);
+  assert.equal(restored[0].selected,false);
+  assert.equal(a.selected,false);
+  assert.equal(b.selected,false);
+  assert.equal(c.selected,false);
+});
