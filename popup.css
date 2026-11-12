@@ -21,3 +21,18 @@ body.popup{box-sizing:border-box;width:420px;height:100%;max-height:none;margin:
 .popup .entry img{width:70px;height:90px;flex-shrink:0}
 .popup .entry span{min-width:0;overflow-wrap:anywhere}
 .popup #image-info{font-size:11px;line-height:1.3;max-height:3.9em;overflow:auto}
+
+/* Reserve visible previews even with expanded options or capture warnings. */
+.popup .buttons{grid-template-columns:2fr 1fr 1fr}.popup .buttons #start{grid-column:auto}
+.popup .capture-options{max-height:155px;overflow:auto}
+.popup #list{min-height:150px}
+body.popup{overflow-y:auto}
+.popup .popup-help{font-size:10px}
+#capture-warning{color:#8b1616;background:#fff0e8;border:1px solid #bd5533;padding:6px;font-weight:600;max-height:5em;overflow:auto}
+#capture-warning[hidden]{display:none}
+.popup #preparation-status{font-size:11px;max-height:2.8em;overflow:auto}
+html.detached-root{width:auto;height:100vh}
+body.popup.detached{width:100%;height:100vh}
+.detached .capture-options{max-height:220px}
+
+body.popup{gap:6px;padding:10px}.popup #status{max-height:3.9em}

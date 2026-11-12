@@ -454,7 +454,7 @@ async function reviewFixture(options = {}) {
     } }; }
   }
   const ids=new Map();
-  for(const id of ['status','list','title','export','merge','undo','merge-numbered','detect','selection','numbering','start','stop','refresh','close-preview','hide-excluded','target-height','detect-height','height-tolerance','minimum-width','exclude-narrow','auto-analyze','auto-ratio','auto-tolerance','review-excluded','auto-summary']) {
+  for(const id of ['capture-warning','status','list','title','export','merge','undo','merge-numbered','detect','selection','numbering','start','stop','refresh','close-preview','hide-excluded','target-height','detect-height','height-tolerance','minimum-width','exclude-narrow','auto-analyze','auto-ratio','auto-tolerance','review-excluded','auto-summary']) {
     ids.set(id,new Element(['title','hide-excluded','target-height','height-tolerance','minimum-width','auto-ratio','auto-tolerance'].includes(id)?'input':id==='status'||id==='list'||id==='selection'||id==='numbering'?'div':'button'));
   }
   ids.get('height-tolerance').valueAsNumber=1;
@@ -524,7 +524,7 @@ async function reviewFixture(options = {}) {
   const idle=async()=>{
     for(let i=0;i<200;i++) {
       await new Promise(resolve=>setTimeout(resolve,2));
-      if(!ids.get('review-excluded').disabled && ids.get('status').textContent)return;
+      if(!ids.get('review-excluded').disabled && ids.get('status').textContent && !rows().some(row=>row.children[1]?.alt==='Loading capture...' && !row.children[1]?.src))return;
     }
     throw new Error('Review operation did not finish');
   };
@@ -1298,21 +1298,23 @@ test('Firefox cross-context PNG bytes transfer without reading the typed-array c
   assert.deepEqual(Buffer.from(result.base64, 'base64'), Buffer.from(f.data));
 });
 
-function archiveFixture() {
+function archiveFixture(processing) {
   const { IDBFactory } = require('fake-indexeddb');
-  let listener, startup;
+  const listeners=[];let startup;
   const browser = { runtime: { id: 'extension', getURL: path => 'moz-extension://fixture/' + path,
-    onMessage: { addListener(fn) { listener = fn; } },
+    onMessage: { addListener(fn) { listeners.push(fn); } },
+    sendMessage: async()=>{},
     onStartup: { addListener(fn) { startup = fn; } },
   } };
-  vm.runInNewContext(fs.readFileSync('dist/imageInfo.js', 'utf8') + '\n' + fs.readFileSync('dist/captureStore.js', 'utf8'), {
-    browser, indexedDB: new IDBFactory(), Uint8Array, atob, btoa,
+  vm.runInNewContext(fs.readFileSync('dist/imageInfo.js', 'utf8') + '\n' + fs.readFileSync('dist/captureStore.js', 'utf8') + (processing ? '\n'+fs.readFileSync('dist/processing.js','utf8') : ''), {
+    browser, indexedDB: new IDBFactory(), Uint8Array, Blob, atob, btoa, AbortController,setTimeout,
+    createCapturedThumbnail: processing?.thumbnail, jpegImageBytes:processing?.jpeg,
   });
   const source = { id: 'extension', frameId: 0, tab: { id: 1 }, url: 'https://test/chapter' };
   const review = { id: 'extension', url: 'moz-extension://fixture/review.html', tab: { id: 2 } };
   return {
-    source: message => listener(structuredClone(message), source),
-    review: message => listener({ tabId: 1, ...structuredClone(message) }, review),
+    source: message => listeners.map(fn=>fn(structuredClone(message),source)).find(value=>value!==undefined),
+    review: message => listeners.map(fn=>fn({tabId:1,...structuredClone(message)},review)).find(value=>value!==undefined),
     startup: () => startup(),
   };
 }
@@ -2037,4 +2039,133 @@ test('review can check the native connector and deliberately keep using the buil
   f.context.browser.downloads.download=async()=>{f.saved.push(archive);return 7;};
   f.ids.get('export').onclick();await f.idle();
   assert.equal(f.saved.length,1);assert.equal(native.connections.length,1);assert.equal(f.workerCalls.length,1);
+});
+
+
+async function preparedArchiveFixture(options={}) {
+  let thumbnails=0,conversions=0;
+  const jpeg=Uint8Array.from([255,216,255,224,0,2,255,217]);
+  const archive=archiveFixture({
+    thumbnail:async()=>{thumbnails++;await options.thumbnail?.();return 'data:image/png;base64,iVBORw0KGgo=';},
+    jpeg:async(_bytes,engine,_state,_report,used,signal)=>{conversions++;await options.jpeg?.(signal);used(engine==='imagemagick'?'ImageMagick':'Built-in');return jpeg;},
+  });
+  const state={generation:'prepare-1',entries:[{url:'blob:test/1',order:0,width:800,height:1200,selected:true}],title:'Chapter',missing:0,capturing:true};
+  await archive.source({action:'archive-reset',state});
+  const original=Uint8Array.from([137,80,78,71,13,10,26,10]);
+  await archive.source({action:'archive-bytes',generation:state.generation,url:'blob:test/1',offset:0,total:original.length,base64:Buffer.from(original).toString('base64')});
+  await archive.source({action:'archive-commit',generation:state.generation,url:'blob:test/1',total:original.length});
+  return {archive,state,original,jpeg,counts:()=>({thumbnails,conversions}),request:message=>archive.review({generation:state.generation,...message})};
+}
+
+test('background preparation caches thumbnails and JPEGs once, with independent encoder profiles and exact original retention',async()=>{
+  const f=await preparedArchiveFixture();
+  await f.request({action:'processing-config',preparation:{jpeg:true,engine:'builtin'}});
+  const first=await f.request({action:'processing-jpeg',url:'blob:test/1',engine:'builtin'});
+  assert.deepEqual(Buffer.from(first.base64,'base64'),Buffer.from(f.jpeg));
+  assert.equal(first.encoder,'Built-in');
+  await f.request({action:'processing-jpeg',url:'blob:test/1',engine:'builtin'});
+  assert.deepEqual(f.counts(),{thumbnails:1,conversions:1});
+  const previews=await f.request({action:'archive-preview-get',urls:['blob:test/1']});
+  assert.equal(previews.previews.length,1);
+  await f.request({action:'processing-jpeg',url:'blob:test/1',engine:'imagemagick'});
+  assert.equal(f.counts().conversions,2);
+  const raw=await f.request({action:'archive-request',command:'blob-data',url:'blob:test/1'});
+  assert.deepEqual(Buffer.from(raw.base64,'base64'),Buffer.from(f.original));
+  await f.request({action:'archive-preview-clear'});
+  await f.request({action:'processing-jpeg',url:'blob:test/1',engine:'builtin'});
+  assert.equal(f.counts().conversions,2,'successful-export thumbnail cleanup retains prepared JPEGs');
+});
+
+test('new capture cancels pending preparation and rejects stale cache requests and writes',async()=>{
+  let started,release;const began=new Promise(resolve=>started=resolve);
+  const f=await preparedArchiveFixture({jpeg:async signal=>{started();await new Promise(resolve=>{release=resolve;signal.addEventListener('abort',resolve,{once:true});});}});
+  const pending=f.request({action:'processing-jpeg',url:'blob:test/1',engine:'builtin'});
+  await began;
+  await f.archive.source({action:'archive-reset',state:{...f.state,generation:'prepare-2',entries:[]}});
+  release();await pending;
+  const stale=await f.request({action:'processing-jpeg',url:'blob:test/1',engine:'builtin'});
+  assert.match(stale.error,/Capture changed/);
+  const current=await f.archive.review({action:'archive-preview-get',generation:'prepare-2',urls:['blob:test/1']});
+  assert.equal(current.previews.length,0);
+});
+
+test('prepared JPEG export bypasses original reading and encoding while retaining reading order',async()=>{
+  const f=exporterFixture({});let reads=0;
+  const jpeg=Uint8Array.from([255,216,255,224,0,2,255,217]);
+  const png=Uint8Array.from([137,80,78,71,13,10,26,10]);
+  await f.context.exportArchive([{url:'blob:first'},{url:'blob:second'}],'Ready',()=>{}, {
+    convertToJpeg:true,preparedJpeg:async url=>({bytes:jpeg,encoder:url}),resolveBytes:async()=>{reads++;return png;},
+  });
+  assert.equal(reads,0);
+  const zip=await JSZip.loadAsync(await f.saved[0].arrayBuffer());
+  assert.deepEqual(Object.keys(zip.files),['0001.jpg','0002.jpg']);
+  assert.deepEqual(await zip.file('0001.jpg').async('uint8array'),jpeg);
+});
+
+test('review export remains usable while the thumbnail cache request is pending',async()=>{
+  const captured=scanMangaFixture(1);captured.page(1);await captured.send('start');
+  const f=await reviewFixture({capture:captured,archive:message=>message.action==='archive-preview-get'?new Promise(()=>{}):Promise.resolve(undefined)});
+  for(let i=0;i<30&&!f.rows().length;i++)await new Promise(resolve=>setTimeout(resolve,2));
+  assert.equal(f.ids.get('export').disabled,false);
+  assert.equal(f.rows()[0].children[1].src,undefined);
+  f.ids.get('title').value='Pending thumbnails';
+  f.ids.get('export').onclick();
+  for(let i=0;i<100&&!f.saved.length;i++)await new Promise(resolve=>setTimeout(resolve,2));
+  assert.equal(f.saved.length,1,'export does not wait for the thumbnail request: '+f.ids.get('status').textContent);
+});
+
+
+test('Start resets source state without waiting for a stalled previous archive queue',async()=>{
+  const f=scanMangaFixture(2);const old=f.page(1);let block=true;
+  f.context.browser.runtime.sendMessage=message=>message.action==='archive-reset'&&block
+    ?new Promise(()=>{}):Promise.resolve({ok:true});
+  void f.send('start');await new Promise(setImmediate);
+  old.isConnected=false;f.document.images=[];f.page(2);block=false;
+  let timeout;
+  const state=await Promise.race([f.send('start'),new Promise((_,reject)=>{timeout=setTimeout(()=>reject(new Error('Reset waited for the old storage queue')),1000);})]).finally(()=>clearTimeout(timeout));
+  assert.equal(state.entries.length,1);
+  assert.match(state.entries[0].url,/page-2/);
+  assert.equal(state.missing,1,'old page slots are discarded');
+});
+
+test('Start unblocks new previews when an old generation thumbnail request never resolves',async()=>{
+  const capture=scanMangaFixture(2);capture.context.browser.runtime.sendMessage=async()=>({ok:true});
+  const old=capture.page(1);const first=await capture.send('start');let requests=0;
+  const f=await reviewFixture({popup:true,capture,archive:message=>{
+    if(message.action==='archive-preview-get'&&++requests===1)return new Promise(()=>{});
+    return Promise.resolve(undefined);
+  }});
+  old.isConnected=false;capture.document.images=[];capture.page(2);
+  await f.ids.get('start').onclick();await f.idle();
+  assert.notEqual((await capture.send('status')).generation,first.generation);
+  assert.equal(f.rows().length,1);
+  assert.match(f.rows()[0].children[1].src,/^blob:review/);
+  assert.ok(requests>=2,'a stalled old preview does not block the new generation');
+});
+
+test('failed PNG recovery warns for connected current-page images and clears after leaving that image',async()=>{
+  const capture=displayedPixelsFixture({tainted:true});
+  await capture.send('start',{autoPixels:true});
+  for(let i=0;i<50&&(await capture.send('status')).pendingSaves;i++)await new Promise(resolve=>setTimeout(resolve,2));
+  const state=await capture.send('status');
+  assert.equal(state.currentPageFailures,1);
+  assert.match(state.currentPageError,/origin-clean/);
+  const f=await reviewFixture({popup:true,capture});await f.idle();
+  const warning=f.ids.get('capture-warning');
+  assert.equal(warning.hidden,false);assert.match(warning.textContent,/Automatic PNG recovery/);
+  capture.image.isConnected=false;
+  await f.ids.get('refresh').onclick();
+  assert.equal(warning.hidden,true,'old page errors do not masquerade as current-page errors');
+});
+
+
+test('Start never presents an archived session as a new capture when the source is unavailable',async()=>{
+  let archivedStarts=0;
+  const stored={archived:true,capturing:false,generation:'old-saved',entries:[],title:'Old',missing:0};
+  const f=await reviewFixture({popup:true,capture:{send:async()=>{throw new Error('document unavailable');}},archive:async message=>{
+    if(message.action==='archive-request'){if(message.command==='start')archivedStarts++;return stored;}
+  }});
+  await f.ids.get('start').onclick();
+  assert.equal(archivedStarts,0);
+  assert.match(f.ids.get('status').textContent,/New capture could not start/);
 });

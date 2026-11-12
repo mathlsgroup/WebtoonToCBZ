@@ -3,10 +3,13 @@ declare const JSZip: new () => {
   generateAsync(options: { type: 'blob'; compression: 'STORE' }): Promise<Blob>;
 };
 
-type ImageExportOptions = { convertToJpeg?: boolean; jpegEngine?: JpegEngine };
+type ImageExportOptions = { convertToJpeg?: boolean; jpegEngine?: JpegEngine;
+  resolveBytes?: (url:string)=>Promise<Uint8Array>;
+  preparedJpeg?: (url:string)=>Promise<{bytes:Uint8Array;encoder:string}|undefined> };
 
 async function jpegImageBytes(bytes: Uint8Array,engine: JpegEngine='builtin',nativeState: {unavailable?:boolean}={},
-  report:(message:string)=>void=()=>{},used:(encoder:string)=>void=()=>{}): Promise<Uint8Array> {
+  report:(message:string)=>void=()=>{},used:(encoder:string)=>void=()=>{},signal?:AbortSignal): Promise<Uint8Array> {
+  if(signal?.aborted)throw new Error('Preparation cancelled.');
   imageExtension(bytes);
   let bitmap: ImageBitmap | undefined = await createImageBitmap(new Blob([new Uint8Array(bytes)]));
   let canvas: HTMLCanvasElement | undefined;
@@ -23,7 +26,8 @@ async function jpegImageBytes(bytes: Uint8Array,engine: JpegEngine='builtin',nat
     const pixels = context.getImageData(0, 0, width, height).data;
     // Release decoded resources before transferring RGBA pixels to the worker.
     bitmap.close(); bitmap = undefined; canvas.width = 0; canvas.height = 0; canvas = undefined;
-    const result=await encodeChosenJpeg(width,height,pixels,engine,nativeState,report);
+    if(signal?.aborted)throw new Error('Preparation cancelled.');
+    const result=await encodeChosenJpeg(width,height,pixels,engine,nativeState,report,signal);
     used(result.encoder);return result.bytes;
   } finally { bitmap?.close(); if (canvas) { canvas.width = 0; canvas.height = 0; } }
 }
@@ -54,10 +58,19 @@ async function exportArchive(urls: (string | { url: string; bytes?: Uint8Array }
   const encoders = new Set<string>();
   const nativeState: {unavailable?:boolean}={};
   for (const [index, page] of urls.entries()) {
+    report('Preparing image '+(index+1)+'/'+urls.length+'... Waiting only for required image data.');
+    const url=typeof page==='string'?page:page.url;
+    const prepared=options.convertToJpeg ? await options.preparedJpeg?.(url) : undefined;
+    if(prepared){
+      if(imageExtension(prepared.bytes)!=='jpg')throw new Error('Invalid prepared JPEG.');
+      zip.file(String(index+1).padStart(4,'0')+'.jpg',prepared.bytes);
+      totalBytes+=prepared.bytes.length;formats.add('jpg');encoders.add(prepared.encoder);
+      report('Using prepared JPEG '+(index+1)+'/'+urls.length+'...');continue;
+    }
     report('Fetching image ' + (index + 1) + '/' + urls.length + '... Keep this review tab open.');
     let bytes: Uint8Array;
     try {
-      bytes = typeof page === 'string' ? await fetchImageBytes(page) : page.bytes ?? await fetchImageBytes(page.url);
+      bytes = (typeof page==='string'?undefined:page.bytes) ?? await (url.startsWith('blob:') && options.resolveBytes ? options.resolveBytes(url) : fetchImageBytes(url));
     } catch (error) { throw new Error('Image ' + (index + 1) + ': ' + String(error) + ' No archive exported.'); }
     let extension: string;
     try { extension = imageExtension(bytes); }

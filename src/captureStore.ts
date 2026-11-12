@@ -1,6 +1,7 @@
 type StoredPage = { url: string; order: number; width: number; height: number; selected: boolean; reencoded?: boolean; saveState?: 'pending' | 'saved' | 'error'; saveError?: string; fileType?: string; byteLength?: number };
 type AutoResumePolicy = { enabled: boolean; token: string; origin: string; chapterKey: string; autoPixels: boolean; includeNextChapters: boolean; pauseReason?: string };
-type StoredCapture = { generation: string; entries: StoredPage[]; title: string; missing: number; capturing: boolean; archiveError?: string; manualOrder?: string[]; previewVersion?: number; autoResume?: AutoResumePolicy };
+type PreparationOptions = { jpeg: boolean; engine: JpegEngine };
+type StoredCapture = { generation: string; entries: StoredPage[]; title: string; missing: number; capturing: boolean; archiveError?: string; manualOrder?: string[]; previewVersion?: number; autoResume?: AutoResumePolicy; preparation?: PreparationOptions };
 
 // Dedicated extension-origin IndexedDB: binaries never enter site storage or sync.
 const captureDatabase = new Promise<IDBDatabase>((resolve, reject) => {
@@ -50,7 +51,9 @@ async function handleArchive(message: ArchiveRequest, sender: { id?: string; fra
           const item = cursor.result;
           if (item) { if ((item.key as IDBValidKey[])[0] === tabId) item.delete(); item.continue(); }
         };
-        sessions.put(state, tabId!); done({ ok: true }); return;
+        sessions.put(state, tabId!); done({ ok: true });
+        if(typeof cancelCapturePreparation==='function')cancelCapturePreparation(tabId!);
+        return;
       }
       if (!stored) { done({ error: 'No saved capture for this tab.' }); return; }
       if (message.action === 'archive-state') {
@@ -59,7 +62,7 @@ async function handleArchive(message: ArchiveRequest, sender: { id?: string; fra
         const autoResume = stored.autoResume && { ...stored.autoResume,
           enabled: stored.autoResume.enabled && message.state.capturing,
           pauseReason: message.state.capturing ? stored.autoResume.pauseReason : 'Stopped by user.' };
-        const state = { ...message.state, autoResume, previewVersion: stored.previewVersion ?? 0, entries: message.state.entries.map(page => acknowledged.has(page.url)
+        const state = { ...message.state, preparation:stored.preparation, autoResume, previewVersion: stored.previewVersion ?? 0, entries: message.state.entries.map(page => acknowledged.has(page.url)
           ? { ...page, reencoded: acknowledged.get(page.url)!.reencoded, fileType: acknowledged.get(page.url)!.fileType ?? page.fileType,
             byteLength: acknowledged.get(page.url)!.byteLength ?? page.byteLength, saveState: 'saved' as const, saveError: undefined } : page) };
         sessions.put(state, tabId!); done({ ok: true }); return;
@@ -158,6 +161,7 @@ async function handleArchive(message: ArchiveRequest, sender: { id?: string; fra
             page.byteLength = total; page.fileType = fileType;
             sessions.put(stored, tabId!);
             done({ ok: true });
+            if(typeof enqueueCapturePreparation==='function')enqueueCapturePreparation(tabId!,generation,page.url);
           };
         }
         return;

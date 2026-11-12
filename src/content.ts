@@ -429,6 +429,8 @@
 
   function start(usePixels = false, resume?: ResumeState): void {
     stop();
+    // A new generation must not wait behind a stalled previous storage request.
+    if(!resume)archiveQueue=Promise.resolve();
     records.clear(); nodes.clear(); seen.clear(); blobs.clear(); chapterPages.clear(); readerChapters.clear();
     positions = new WeakMap(); nextOrder = 0; generation = resume?.generation ?? crypto.randomUUID();
     title = resume?.title || ''; manualOrder = resume?.manualOrder || [];
@@ -496,7 +498,13 @@
     const finalOrder = [...manualOrder.filter(url => byUrl.has(url)).map(url => byUrl.get(url)!),
       ...ordered.filter(entry => !manualSet.has(entry.url))];
     const localPages = finalOrder.filter(entry => entry.url.startsWith('blob:'));
+    const currentPageFailures=localPages.filter(entry=>{
+      const node=nodes.get(entry.url);
+      return entry.saveState==='error'&&node?.isConnected&&(node.currentSrc||node.src)===entry.url;
+    });
     return { capturing, generation, title, entries: finalOrder, missing, autoPixels, archiveError, captureNotice, manualOrder,
+      currentPageFailures:currentPageFailures.length,
+      currentPageError:currentPageFailures[0]?.saveError,
       readerChapters: [...readerChapters.values()],
       savedCount: localPages.filter(entry => entry.saveState === 'saved').length,
       unsavedCount: localPages.filter(entry => entry.saveState !== 'saved').length,

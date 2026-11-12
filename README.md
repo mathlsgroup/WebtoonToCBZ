@@ -358,30 +358,40 @@ are removed or their source changes.
 Same-origin `blob:` image URLs are also captured. Their bytes are read in the
 source content script as soon as the loaded image is encountered during reading,
 so later URL revocation does not require refetching the image. The review tab
-retrieves the cached data in 256 KiB messages, validates the signature and creates
-its own temporary object URL for preview. Unmerged bytes are exported unchanged.
-The 420-pixel-wide popup displays local previews directly (70 by 90 pixels). On
-the first read it creates a derived PNG thumbnail, bounded to 140 by 180 pixels
-for high-density displays, and saves it in extension IndexedDB. Reopening fetches
-all available thumbnails in one request: it does not transfer/decode the original
-image again or recalculate a thumbnail. Missing thumbnails are generated once,
-and previews appear progressively instead of waiting for the entire chapter.
-This cache never modifies captured originals or CBZ entries. Thumbnail-only popup
-entries are not treated as full image bytes; review/export reads the original
-payloads separately. Cache failures fall back to the uncached preview path.
-No source blob URL is opened from the extension origin. Successful previews are
-reused across Refresh and temporary object URLs are released on closing.
-Per-image read/decode failures appear beside the thumbnail instead of a misleading
-instruction to open the review tab. The review/export button stays below the
-scrolling image list; use the review tab for larger previews and editing.
+uses cached thumbnails; it reads full originals on demand for full-size previews,
+analysis, merging or export. Unmerged bytes are exported unchanged by default.
+The 420-pixel-wide popup displays local previews directly (70 by 90 pixels).
+After each saved blob image, a background queue creates a PNG thumbnail bounded
+to 140 by 180 pixels. Popup and review fetch available thumbnails in one request;
+reopening does not transfer or decode the originals. Thumbnail loading never locks
+the export/review commands. Individual files still must be available for export.
 
-Start new capture deletes the previous capture's thumbnail cache. A confirmed
-successful export clears only derived thumbnails, retaining original bytes and
-review edits for undo/re-export. Cancelled/failed exports leave the cache intact.
-A cache version prevents an older popup from repopulating it after an export
-clears it. The first popup opening after clearing regenerates previews as needed.
-Thumbnail payloads are limited to 256 KiB each and validated as PNG. They share
-the capture's generation/tab scope and local-only lifecycle, without new permissions.
+Open **Background JPEG preparation** in the popup and enable **Prepare JPEG 97 /
+4:4:4 while reading** before or during capture. Choose Automatic, Built-in or
+ImageMagick; use **Check ImageMagick** in review to grant connector access first.
+The review JPEG checkbox controls the same capture-scoped preparation setting.
+This option is off by default. Already saved blob images are queued too, and the
+setting survives automatic chapter continuation. HTTP-only images not saved in the
+capture are still fetched/converted during export with the existing permissions.
+
+Preparation runs one job at a time, yields between jobs, and keeps originals
+independent of derived assets. JPEGs are persisted as local IndexedDB Blobs, keyed
+by capture, source and encoder/profile. Export reuses prepared JPEGs and prioritizes
+needed conversion jobs over queued previews; unfinished conversions may still
+require waiting. Changes to order or inclusion do not invalidate existing images.
+A merged image has its own source identity and is converted separately; undo can
+reuse the original strips' prepared files. Background status reports pending jobs
+and failures; failed conversions are retried when exporting. Opening or refreshing
+the UI reconstructs missing preparation jobs after a background-page restart.
+
+Start new capture cancels old jobs and deletes that tab's originals and derived
+assets. Successful export clears derived thumbnails only, retaining originals,
+prepared JPEGs and review edits for undo/re-export. Failed/cancelled downloads do
+not clear the cache. A version prevents stale thumbnail writes after clearing.
+Missing thumbnails are regenerated on reopening. All capture data remains local.
+No source blob URL is opened from the extension origin. Temporary full-image
+preview URLs are released when the UI closes. Save only authorized images.
+
 Recovered blob bytes are also saved in bounded IndexedDB chunks. The source tab
 is needed while reading/capturing pixels, but saved bytes remain available after
 its document changes or closes. Keep the review tab open until export completes;
@@ -514,6 +524,7 @@ complete CBZ are assembled in memory, which limits very large chapters.
 - `src/content.ts`: scoped, idempotent injection, viewport observation and review state.
 - `src/background.ts`: validates source requests and performs the displayed-blob
   fallback in the source page context when isolated reads fail.
+- `src/processing.ts`: serial background thumbnail/JPEG preparation and persistent derivative caches.
 - `src/capturedBlobs.ts`: bounded transport of cached source image bytes to review.
 - `src/captureStore.ts`: transactional local checkpoints and archived image chunks,
   with generation checks and review access after source navigation.
@@ -548,3 +559,25 @@ lazy loading, short strips, source replacement, exclusions across popup reopenin
 manual ordering, host permission refusal/grant, a blocked image, saving/cancelling,
 and source-tab navigation. Verify exported order and bytes in a standard CBZ reader.
 The example sites in AGENTS.md have not yet been validated.
+
+
+### Starting over and capture warnings
+
+Start new capture replaces the current source tab's capture generation, saved
+images, derived thumbnails/JPEGs, exclusions and ordering. Stalled old storage
+or preview requests cannot block the new generation. If the source script is
+unavailable or local reset fails, the UI reports the failure instead of showing
+an archived session as a successful new capture. Firefox does not need restarting.
+
+A dedicated red warning reports failed image capture/saving for images still
+connected to the current document. When automatic PNG recovery is enabled, it
+explicitly warns that recovery did not produce a saved image. Keep the chapter
+open and retry; unloaded/unread chapter pages remain a separate completeness
+warning. The warning refreshes while the capture UI is open and clears when the
+failed image leaves the current document or is recovered.
+
+Firefox toolbar popups are capped at 600 CSS pixels in height. Capture/conversion
+settings are collapsible and the preview list reserves 150 pixels. Use **Open
+taller capture window** for a resizable, 470-by-900-pixel requested window bound
+to the same source tab. The desktop/window manager may constrain its actual size.
+This window shares the same local capture and does not start another session.

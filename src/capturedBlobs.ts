@@ -1,5 +1,22 @@
 type CapturedBlobChunk = { generation?: string; offset?: number; total?: number; base64?: string; error?: string };
 
+async function readPreparedJpeg(tabId:number,generation:string,url:string,engine:JpegEngine):Promise<{bytes:Uint8Array;encoder:string}|undefined>{
+  let bytes:Uint8Array|undefined;let offset=0;let encoder='';
+  do {
+    const chunk=await browser.runtime.sendMessage({action:'processing-jpeg',tabId,generation,url,engine,offset});
+    if(!chunk||chunk.miss)return undefined;
+    if(chunk.error)throw new Error(chunk.error);
+    if(chunk.generation!==generation||chunk.offset!==offset||!Number.isSafeInteger(chunk.total)||chunk.total<1||chunk.total>128*1024*1024
+      ||typeof chunk.base64!=='string'||chunk.base64.length>350000)throw new Error('Invalid prepared JPEG transfer.');
+    bytes??=new Uint8Array(chunk.total);
+    const binary=atob(chunk.base64);
+    if(chunk.total!==bytes.length||binary.length!==Math.min(256*1024,bytes.length-offset))throw new Error('Incomplete prepared JPEG.');
+    for(let i=0;i<binary.length;i++)bytes[offset+i]=binary.charCodeAt(i);
+    offset+=binary.length;encoder=chunk.encoder;
+  }while(offset<bytes.length);
+  return {bytes,encoder};
+}
+
 // Firefox messages carry bounded base64 chunks; source object URLs never need to
 // be opened from an extension origin or granted HTTP host permissions.
 async function readCapturedBlob(tabId: number, generation: string, url: string): Promise<Uint8Array> {

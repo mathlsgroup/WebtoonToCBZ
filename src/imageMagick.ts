@@ -26,7 +26,10 @@ function imageMagickConnection() {
         catch(error) { clearTimeout(timer);pending.delete(id);reject(error); }
       });
     },
-    close() { port.disconnect(); },
+    close() {
+      for(const request of pending.values()){clearTimeout(request.timer);request.reject(new Error('ImageMagick connection closed.'));}
+      pending.clear();port.disconnect();
+    },
   };
 }
 
@@ -49,9 +52,11 @@ async function probeImageMagick(): Promise<string> {
   finally { connection.close(); }
 }
 
-async function encodeImageMagick(width: number, height: number, pixels: Uint8ClampedArray): Promise<Uint8Array> {
+async function encodeImageMagick(width: number, height: number, pixels: Uint8ClampedArray,signal?:AbortSignal): Promise<Uint8Array> {
   await imageMagickPermission();
+  if(signal?.aborted)throw new Error('JPEG encoding cancelled.');
   const connection = imageMagickConnection();
+  const cancel=()=>connection.close();signal?.addEventListener('abort',cancel,{once:true});
   const chunkSize = 256 * 1024;
   try {
     validateImageMagick(await connection.request('ping'));
@@ -75,19 +80,20 @@ async function encodeImageMagick(width: number, height: number, pixels: Uint8Cla
     }
     assertJpeg444(bytes,width,height);
     return bytes;
-  } finally { connection.close(); }
+  } finally { signal?.removeEventListener('abort',cancel);connection.close(); }
 }
 
 async function encodeChosenJpeg(width: number,height: number,pixels: Uint8ClampedArray,engine: JpegEngine,
-  nativeState: { unavailable?: boolean },report: (message:string)=>void):Promise<{bytes:Uint8Array;encoder:string}> {
+  nativeState: { unavailable?: boolean },report: (message:string)=>void,signal?:AbortSignal):Promise<{bytes:Uint8Array;encoder:string}> {
   if(!['auto','builtin','imagemagick'].includes(engine))throw new Error('Unknown JPEG encoder.');
   if(engine!=='builtin' && !nativeState.unavailable) {
-    try { report('Encoding JPEG 97 / 4:4:4 with ImageMagick...');return {bytes:await encodeImageMagick(width,height,pixels),encoder:'ImageMagick'}; }
+    try { report('Encoding JPEG 97 / 4:4:4 with ImageMagick...');return {bytes:await encodeImageMagick(width,height,pixels,signal),encoder:'ImageMagick'}; }
     catch(error) {
+      if(signal?.aborted)throw error;
       if(engine==='imagemagick')throw error;
       nativeState.unavailable=true;
       report('ImageMagick unavailable; using the built-in JPEG 97 / 4:4:4 encoder.');
     }
   }
-  return {bytes:await encodeJpeg97(width,height,pixels),encoder:'Built-in'};
+  return {bytes:await encodeJpeg97(width,height,pixels,signal),encoder:'Built-in'};
 }

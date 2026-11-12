@@ -1,14 +1,20 @@
 <!doctype html><html lang="en" class="popup-root"><head><meta charset="utf-8"><link rel="stylesheet" href="popup.css"></head><body class="popup">
 <h1>Webtoon to CBZ <small>v0.1</small></h1>
+<p id="capture-warning" role="alert" hidden></p>
 <p id="status">Loading…</p>
-<label><input id="auto-pixels" type="checkbox" checked> Automatic PNG fallback: save displayed pixels if original bytes are not ready (re-encodes the image).</label>
-<label><input id="auto-continue" type="checkbox" checked> Automatic continuation: include following chapters in this tab (site access required).</label>
 <div class="buttons"><button id="start">Start new capture</button><button id="stop">Stop</button><button id="refresh">Refresh</button></div>
 <label>CBZ filename <input id="title" type="text" placeholder="Series - 0280"></label>
+<details class="capture-options"><summary>Capture and conversion options</summary>
+<label><input id="auto-pixels" type="checkbox" checked> Automatic PNG fallback: save displayed pixels if original bytes are not ready (re-encodes the image).</label>
+<label><input id="auto-continue" type="checkbox" checked> Automatic continuation: include following chapters in this tab (site access required).</label>
 <label><input id="show-image-info" type="checkbox"> Show file formats and average size</label>
 <p id="image-info" hidden aria-live="polite"></p>
+<details><summary>Background JPEG preparation</summary><label><input id="prepare-jpeg" type="checkbox"> Prepare JPEG 97 / 4:4:4 while reading</label><select id="prepare-engine"><option value="auto">Automatic</option><option value="builtin">Built-in</option><option value="imagemagick">ImageMagick (required)</option></select></details>
+</details>
+<p id="preparation-status" role="status"></p>
+<button id="larger-window">Open taller capture window</button>
 <div id="list"></div>
-<p class="popup-help">Detected images are saved locally. After navigation, reopen the extension to review the saved capture. Start new capture replaces it. Wait for local saving before leaving. Save only images you are authorized to archive.</p>
+<p class="popup-help">Wait for local saving before leaving. Start replaces the previous capture. Archive only authorized images.</p>
 <button id="export" disabled>Open review and export tab</button>
 <script src="imageInfo.js"></script><script src="imageMerger.js"></script><script src="export.js"></script><script src="capturedBlobs.js"></script><script src="popup.js"></script>
 </body></html>

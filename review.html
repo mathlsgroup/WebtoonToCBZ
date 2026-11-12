@@ -2,6 +2,7 @@
 <html lang="en"><head><meta charset="utf-8"><title>Webtoon to CBZ — Review</title><link rel="stylesheet" href="popup.css"></head>
 <body class="review">
 <h1>Review chapter images</h1>
+<p id="capture-warning" role="alert" hidden></p>
 <p id="status" role="status">Loading...</p>
 <p>Keep this tab open until export completes. Check order, remove ads, and verify completeness. Saved captures remain reviewable after source navigation; images not saved before leaving may be unavailable. Use only for images you are authorized to save.</p>
 <div class="buttons"><button id="start">Start</button><button id="stop">Stop</button><button id="refresh">Refresh</button></div>
@@ -24,6 +25,7 @@
 <p id="auto-summary" role="status">Automatic analysis proposes all groups and sets aside nonmatching images. Check exclusions before merging.</p>
 </div>
 <p>Page number: give strips the same number, then use Merge numbered pages. Excluded images between strips are ignored. Suggest page numbers checks borders and portrait ratios. Suggest by height replaces assignments using total heights within the chosen tolerance, without checking borders or reference ratios. Review before merging. Numbers label groups; reading order controls export.</p>
+<p id="preparation-status" role="status"></p>
 <div id="list"></div>
 <dialog id="large-preview"><button id="close-preview">Close preview</button><img alt="Full page preview"></dialog>
 <button id="export" disabled>Export selected images to CBZ</button>

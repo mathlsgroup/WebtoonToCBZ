@@ -23,11 +23,15 @@ function assertJpeg444(bytes: Uint8Array, width: number, height: number): void {
   throw new Error('JPEG output has no valid 4:4:4 baseline frame.');
 }
 
-async function encodeJpeg97(width: number, height: number, pixels: Uint8ClampedArray): Promise<Uint8Array> {
+async function encodeJpeg97(width: number, height: number, pixels: Uint8ClampedArray,signal?:AbortSignal): Promise<Uint8Array> {
+  if(signal?.aborted)throw new Error('JPEG encoding cancelled.');
   const worker = new Worker(browser.runtime.getURL('jpegWorker.js'));
+  let cancel:()=>void=()=>{};
   try {
     const bytes = await new Promise<Uint8Array>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('JPEG encoding exceeded the two-minute per-image limit.')), 120000);
+      cancel=()=>{clearTimeout(timeout);reject(new Error('JPEG encoding cancelled.'));};
+      signal?.addEventListener('abort',cancel,{once:true});
       worker.onmessage = (event: MessageEvent<{ bytes?: ArrayBuffer; error?: string }>) => {
         clearTimeout(timeout);
         if (event.data?.error) reject(new Error(event.data.error));
@@ -40,5 +44,5 @@ async function encodeJpeg97(width: number, height: number, pixels: Uint8ClampedA
     });
     assertJpeg444(bytes, width, height);
     return bytes;
-  } finally { worker.terminate(); }
+  } finally { signal?.removeEventListener('abort',cancel);worker.terminate(); }
 }
