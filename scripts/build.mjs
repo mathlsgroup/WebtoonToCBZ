@@ -17,8 +17,8 @@ try {
   execFileSync(process.execPath, [require.resolve('typescript/bin/tsc'), '--outDir', staging],
     { cwd: root, stdio: 'inherit' });
   mkdirSync(staging, { recursive: true });
-  for (const file of ['manifest.json', 'popup.html', 'popup.css', 'review.html']) {
-    cpSync(resolve(root, file), resolve(staging, file));
+  for (const file of ['manifest.json', 'popup.html', 'popup.css', 'review.html', 'icons']) {
+    cpSync(resolve(root, file), resolve(staging, file), { recursive: true });
   }
   cpSync(require.resolve('jpeg-js/lib/encoder.js'), resolve(staging, 'jpeg-encoder.js'));
   // JSZip's bundled setImmediate shim accepts string callbacks through dynamic
@@ -35,3 +35,4 @@ try {
 } finally {
   rmSync(staging, { recursive: true, force: true });
 }
+

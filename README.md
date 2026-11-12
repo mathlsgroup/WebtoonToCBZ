@@ -33,6 +33,15 @@ and select `dist/manifest.json`. Reload the add-on after rebuilding.
 
 ## Workflow
 
+The Firefox toolbar icon is updated per source tab, including while the popup is
+closed (within approximately 750 ms). Red means pending image saves, missing pages,
+queued/running thumbnail or JPEG preparation, or a reported failure. Green means
+the known selected images have completed their current local processing. Gray
+means no capture or no selected images. Hover over the icon for details.
+Green does not certify unread/undetected pages or a future successful export:
+HTTP(S) images are still downloaded at export, and reading more pages can turn the
+icon red again. Review the chapter before exporting. No new permissions are used.
+
 1. Open an authorized HTTP(S) chapter and complete any human verification yourself.
 2. Choose whether to allow **Automatic PNG fallback** and **Automatic continuation**,
    then click **Start new capture**. Automatic continuation requests access to this

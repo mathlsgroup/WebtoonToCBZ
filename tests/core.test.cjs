@@ -4,6 +4,34 @@ const vm = require('node:vm');
 const fs = require('node:fs');
 const JSZip = require('jszip');
 
+test('toolbar icon reflects committed saves, queued work, failures and tab isolation', () => {
+  const jobs = new Map(), errors = new Map();
+  const context = vm.createContext({ preparationJobs: jobs, preparationErrors: errors,
+    setInterval() {}, captureDatabase: new Promise(() => {}) });
+  vm.runInContext(fs.readFileSync('dist/statusIcon.js', 'utf8'), context);
+  const status = (state, tabId = 1) => context.captureIconStatus(tabId, state).color;
+  const state = { entries: [{ url: 'blob:https://test/1', selected: true, saveState: 'pending' }], missing: 0 };
+  assert.equal(status(), 'idle');
+  assert.equal(status({ entries: [], missing: 0 }), 'idle');
+  assert.equal(status(state), 'busy');
+  state.entries[0].saveState = 'saved';
+  assert.equal(status(state), 'ready');
+  const key = JSON.stringify([1, 'generation', state.entries[0].url, 'jpeg', 'builtin']);
+  jobs.set(key, Promise.resolve());
+  assert.equal(status(state), 'busy');
+  assert.equal(status(state, 2), 'ready');
+  jobs.clear(); errors.set(key, 'Encoding failed');
+  assert.equal(status(state), 'busy');
+  errors.clear(); state.missing = 1;
+  assert.equal(status(state), 'busy');
+  state.missing = 0; state.entries[0].saveState = 'error';
+  assert.equal(status(state), 'busy');
+  state.entries[0].selected = false;
+  assert.equal(status(state), 'idle');
+  state.archiveError = 'Disk full';
+  assert.equal(status(state), 'busy');
+});
+
 function captureFixture(options = {}) {
   let handler;
   const events = {};
