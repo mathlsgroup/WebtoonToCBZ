@@ -1,5 +1,7 @@
 # Webtoon to CBZ — v0.1 prototype
 
+Project handoff: [conversation summary and remaining Firefox checks](docs/CHAT_SUMMARY_2026-11-12.md).
+
 Firefox-first extension for archiving images you are authorized to save. Captures
 image URLs while you read, offers review and ordering, and exports an ordinary ZIP
 with a .cbz extension. Available original bytes are preserved; PNG pixel fallbacks
